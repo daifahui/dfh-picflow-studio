@@ -32,7 +32,7 @@ def read_skill_system_prompt() -> str:
             parts.append(p.read_text(encoding="utf-8"))
         except OSError:
             if not _skill_warned:
-                sse.publish("log", text=f"[warn] skill 文件缺失：{p}")
+                sse.hub.publish("log", text=f"[warn] skill 文件缺失：{p}")
                 _skill_warned = True
     return "\n\n---\n\n".join(parts)
 
@@ -61,14 +61,14 @@ def start_llama_server() -> None:
 
 def ensure_llm() -> None:
     if is_llm_up():
-        sse.publish("log", text="llama-server 已在运行（复用现有实例，结束时不关闭）")
+        sse.hub.publish("log", text="llama-server 已在运行（复用现有实例，结束时不关闭）")
         return
-    sse.publish("log", text="启动 llama-server（iq2_m 64K 视觉档）…")
+    sse.hub.publish("log", text="启动 llama-server（iq2_m 64K 视觉档）…")
     start_llama_server()
     deadline = time.time() + config.SERVICE_READY_TIMEOUT
     while time.time() < deadline:
         if is_llm_up():
-            sse.publish("log", text="llama-server 就绪")
+            sse.hub.publish("log", text="llama-server 就绪")
             return
         time.sleep(2)
     raise RuntimeError("llama-server 启动超时（详见 logs/llama-server.log）")
@@ -82,7 +82,7 @@ def stop_llm() -> None:
     subprocess.run(["taskkill", "/T", "/F", "/PID", str(_owned_proc.pid)],
                    capture_output=True)
     _owned_proc = None
-    sse.publish("log", text="已关闭代管的 llama-server")
+    sse.hub.publish("log", text="已关闭代管的 llama-server")
 
 
 # ---------- caption 请求 ----------
@@ -141,5 +141,5 @@ def caption_image(image_path: Path, note: str = "") -> dict:
             return _parse_contract(content)
         except Exception as e:  # noqa: BLE001 —— 重试后向外抛
             last_err = e
-            sse.publish("log", text=f"[caption] 第 {attempt + 1} 次失败：{e}")
+            sse.hub.publish("log", text=f"[caption] 第 {attempt + 1} 次失败：{e}")
     raise RuntimeError(f"caption 重试耗尽：{last_err}")

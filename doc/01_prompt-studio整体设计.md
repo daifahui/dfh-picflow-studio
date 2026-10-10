@@ -2,8 +2,8 @@
 
 > 项目代号：**prompt-studio**
 > 位置：`D:\work_space\ai\llm\qwen_28b\prompt-studio\`（git 管理）
-> 版本：v1.1 定稿（2026-10-10，需求经用户逐项确认，三个待定项已决策，见 §12）
-> 状态：**设计定稿，即将进入 M1 开发——本文档撰写阶段未启动任何模型服务**
+> 版本：v1.2（2026-10-10，新增 §13 技术选型与协议栈、§14 测试体系、§15 缺口清单）
+> 状态：**骨架 + 测试体系完成（73 用例全绿，86% 覆盖）；真实模型端到端待用户批准**
 
 ---
 
@@ -183,22 +183,30 @@ outputs/<任务名时间戳>/
 | TextEncodeQwenImage21.resolution | 1024 | 官方模板（仅影响参考图，t2i 无关） |
 | filename 前缀 | 任务编号 | — |
 
-## 10. 代码目录结构（规划）
+## 10. 代码目录结构（现状）
 
 ```
 prompt-studio/
   doc/                    ← 设计文档（本文件所在）
   server/
-    main.py               ← FastAPI 入口 + 路由
-    state.py              ← 任务/条目状态机
+    main.py               ← FastAPI 入口 + 路由 + 两阶段 worker
+    config.py             ← 外部设施路径、端点、默认参数
+    state.py              ← 任务/条目状态机（task.json 持久化、断点回看）
     input_ingest.py       ← 文件夹扫描、zip/7z 解压、自然排序
-  llm_caption.py        ← llama-server 代管 + skill 拼接（实时读取 pi skill 目录）+ 契约请求/解析
-  comfy_client.py       ← ComfyUI 代管 + API 图构建 + 轮询
-  sse.py                ← 进度事件广播
+    llm_caption.py        ← llama-server 代管 + skill 拼接（实时读取 pi skill 目录）+ 契约请求/解析
+    comfy_client.py       ← ComfyUI 代管 + API 图构建 + 轮询收图
+    sse.py                ← 进度事件广播（线程安全）
   web/
-    index.html / app.js / style.css
+    index.html / app.js / style.css   ← 原生单页，无构建
+  tests/                  ← pytest 测试套（见 §14）
+    conftest.py           ← 模型桩（铁律：测试绝不拉起真实模型）
+    test_input_ingest.py / test_state.py / test_sse.py
+    test_llm_caption.py / test_comfy_client.py / test_api.py
+    test_e2e_web.py       ← Playwright 真浏览器测试
+  logs/                   ← llama-server / ComfyUI 代管日志（gitignore）
   start-server.cmd        ← 一键启动（含依赖安装检查）
-  requirements.txt        ← fastapi uvicorn py7zr httpx pillow
+  requirements.txt        ← fastapi uvicorn httpx pillow py7zr python-multipart
+  requirements-dev.txt    ← pytest pytest-cov respx playwright
 ```
 
 > skill 读取策略（已定）：**实时读取** `C:\Users\admin\.pi\agent\skills\qwen-image-21-prompt-writing\`，
@@ -225,3 +233,85 @@ prompt-studio/
 | q4 高质量档 | v1 不做 UI，固定 iq2_m 64K 档 |
 | 任务历史 | v1 单活动任务 + 历史目录只读回看，多任务并行留待 v2 |
 | **模型运行批准** | **开发/测试期间运行 llama-server 与 ComfyUI 必须经用户批准；网页上的「提取提示词/生成」按钮由用户点击，视为批准动作** |
+
+---
+
+## 13. 技术选型与协议栈（2026-10-10 调研定稿）
+
+### 13.1 选型结论与依据
+
+| 层 | 选型 | 依据 |
+|---|---|---|
+| 后端框架 | **FastAPI + uvicorn**（已在用） | 原生异步 + SSE 支持好；[官方测试指南](https://fastapi.tiangolo.com/advanced/async-tests) 完善 |
+| 外呼 HTTP | httpx（同步） | worker 跑在线程里；[respx](https://marcelotryle.com/blog/contract-testing) 可完整 mock |
+| 前端 | **原生 HTML/CSS/JS 单页，无构建** | 单页三视图 ~250 行，引入框架（Vue/React+Vite 需构建链，Alpine.js ~15KB/petite-vue ~6KB）收益低于维护成本；[HN 社区对小项目的共识](https://news.ycombinator.com/item?id=29502633)即"vanilla 优先"。观察点：app.js 超过 ~500 行再考虑 Alpine.js |
+| 后端测试 | **pytest + pytest-cov + respx + starlette TestClient** | FastAPI 生态标准路线；respx 拦截 httpx 外呼，模型服务零触达 |
+| 网页测试 | **Playwright**（channel=`msedge`，免下载 Chromium） | 无构建页面可直接 E2E；能抓路由/方法级真实 bug（本项目已验证，见 §14.4） |
+
+### 13.2 协议栈
+
+```
+浏览器 (Edge/Chrome)
+  │  REST JSON over HTTP/1.1 (127.0.0.1:9178)
+  │  + SSE text/event-stream（进度/日志/条目状态推送，15s 心跳保活）
+  │  + multipart/form-data（zip/7z 上传）
+  ▼
+FastAPI 后端 (server/)
+  │  OpenAI 兼容 POST /v1/chat/completions（图片走 base64 data URL）
+  └──────────────► llama-server :1234（阶段一；两阶段互斥串行）
+  │  JSON API 图 POST /prompt + GET /history/{id} 轮询 + GET /view 取图
+  └──────────────► ComfyUI :8188（阶段二）
+```
+
+## 14. 测试体系（已建成，73 用例全绿）
+
+### 14.1 铁律
+
+**任何测试不得拉起真实 llama-server / ComfyUI。** 全部模型触点
+（`ensure_llm / caption_image / stop_llm / ensure_comfy / generate_one / stop_comfy`）
+在 `tests/conftest.py`（接口级）与 `test_e2e_web.py` 的 `server` fixture（模块级）中打桩。
+历史上 E2E 曾因漏桩真的拉起过 llama-server，已修正为模块级强制打桩。
+
+### 14.2 测试分层
+
+| 层 | 文件 | 覆盖 |
+|---|---|---|
+| 单元 | test_input_ingest / test_state / test_sse | 自然排序、zip 防护、状态机持久化/断点回看、SSE 线程投递 |
+| 单元 | test_llm_caption / test_comfy_client | 契约解析（think 剥离/裸换行/坏 JSON 重试）、wh_ratio 换算参数化、API 图结构断言、respx mock 的 /prompt→/history→/view 全流程与错误路径 |
+| 接口 | test_api（TestClient） | 任务创建（文件夹/zip/非法源/409）、上传、fake worker 全流程状态机（auto: caption→reviewing→generate→done + 落盘断言）、条目编辑、recaption 传注、停止、图片服务 MIME 与 404 |
+| E2E | test_e2e_web（Playwright + 真实 Edge） | 三视图切换、参数表单默认值、SSE 事件驱动进度条（route 注入事件流）、真后端桩模型全链路（点击提取→网格渲染已提取）、侧栏编辑保存持久化、全部生成→结果页对照 |
+
+### 14.3 运行
+
+```
+.venv\Scripts\python -m pytest tests\ -q                 # 全量（≈15s）
+.venv\Scripts\python -m pytest tests\ --cov=server       # 覆盖率（当前 86%）
+```
+
+注：SSE 端点的无限流在 TestClient 下无法优雅关闭（会挂死），其全链路行为
+由 E2E 真浏览器测试覆盖，广播逻辑由 test_sse 单元测试覆盖。
+
+### 14.4 测试已发现并修复的真实缺陷（价值证明）
+
+1. `llm_caption.py`/`comfy_client.py` 误引 `sse.publish`（应为 `sse.hub.publish`）→ 后端测试抓出；
+2. E2E：侧栏 `<aside class="hidden">` 的 `display:none !important` 使详情侧栏永远无法弹出 → 真实用户可感知的前端 bug；
+3. E2E：前端「保存修改」用 POST 而后端只注册 PUT → 405，保存静默失败；
+4. `wh_ratio "0:0"` 触发 ZeroDivisionError 而非 ValueError → 补防御。
+
+### 14.5 测试期外部设施影响面
+
+- 端口占用：E2E 用 9189/9190 等独立端口，不与 9178/1234/8188 冲突；
+- llama-server 误启动事件（已处置）：一次 E2E 漏桩导致 llama-server 被拉起，
+  发现后已 taskkill 并回填模块级桩；处置记录见 git 历史。
+
+## 15. 缺口清单（当前确认缺少/待办）
+
+| # | 缺口 | 影响 | 计划 |
+|---|---|---|---|
+| 1 | **真实模型端到端验收**（真 caption 一批图 + 真生图闭环） | 未验证 skill 注入的实际产出质量与显存串行切换 | **待用户批准后执行**（M2/M4 验收） |
+| 2 | E2E 未覆盖：文件上传控件、服务器端 tkinter「选择文件夹」弹窗（需人工交互） | 上传路径仅接口级覆盖 | 低优先；上传可用 Playwright set_input_files 补 |
+| 3 | 服务级故障注入未做（llama-server 启动超时、ComfyUI 中途崩溃） | 失败重试逻辑仅桩级验证 | v1.1 补 respx 超时用例 |
+| 4 | 前端无框架，状态与 DOM 手动同步 | 超 ~500 行后维护成本上升 | 观察点；超阈值引入 Alpine.js |
+| 5 | 无 CI / pre-commit 钩子 | 回归靠手动跑 | 可加 local hook：commit 前跑 pytest |
+| 6 | `@app.on_event("startup")` 已被 FastAPI 标记 deprecated | 未来版本兼容 | 迁移到 lifespan（顺手改） |
+| 7 | q4 档 UI、多任务并行队列、任务历史管理页 | 功能完整度 | v2（见 §12） |

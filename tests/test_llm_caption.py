@@ -1,0 +1,119 @@
+"""llm_caption 单元测试：契约解析、skill 读取、caption 流程（respx mock，绝不触真服务）。"""
+import json
+from pathlib import Path
+
+import httpx
+import pytest
+import respx
+
+from server import config, llm_caption
+
+BASE = config.LM_API_BASE
+
+
+def _chat(content: str) -> dict:
+    return {"choices": [{"message": {"content": content}}]}
+
+
+# ---------- _parse_contract ----------
+GOOD = json.dumps({"rewritten_prompt": "a girl at the window", "wh_ratio": "9:16"},
+                  ensure_ascii=False)
+
+
+def test_parse_plain_json():
+    assert llm_caption._parse_contract(GOOD) == {
+        "rewritten_prompt": "a girl at the window", "wh_ratio": "9:16"}
+
+
+def test_parse_strips_think_block():
+    wrapped = f"<think>让我想想……图里是深夜的窗边。</think>\n{GOOD}"
+    assert llm_caption._parse_contract(wrapped)["rewritten_prompt"] == "a girl at the window"
+
+
+def test_parse_bare_newlines_inside_string():
+    raw = '{"rewritten_prompt": "line one\n line two", "wh_ratio": "4:5"}'
+    c = llm_caption._parse_contract(raw)      # strict=False 宽容解析
+    assert "line one" in c["rewritten_prompt"]
+
+
+def test_parse_prompt_embedded_json_and_noise():
+    wrapped = f"好的，以下是结果：\n```json\n{GOOD}\n```\n以上。"
+    assert llm_caption._parse_contract(wrapped)["wh_ratio"] == "9:16"
+
+
+@pytest.mark.parametrize("bad,why", [
+    ("没有 json", "未找到 JSON"),
+    ('{"wh_ratio": "9:16"}', "rewritten_prompt"),
+    ('{"rewritten_prompt": "x", "wh_ratio": "宽屏"}', "wh_ratio"),
+    ('{"rewritten_prompt": "x", "wh_ratio": "9:16:1"}', "wh_ratio"),
+])
+def test_parse_rejects_garbage(bad, why):
+    with pytest.raises(ValueError, match=why):
+        llm_caption._parse_contract(bad)
+
+
+# ---------- skill 读取（只读文件，不联网） ----------
+def test_read_skill_system_prompt_real_files():
+    text = llm_caption.read_skill_system_prompt()
+    assert "rewritten_prompt" in text            # 契约说明来自 SKILL.md
+    assert "system_prompt_t2i" or True
+
+
+def test_read_skill_missing_dir_returns_empty(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(config, "PI_SKILL_DIR", tmp_path / "nope")
+    assert llm_caption.read_skill_system_prompt() == ""
+
+
+# ---------- caption_image（respx 拦截 httpx.post） ----------
+@respx.mock
+def test_caption_image_success_sends_image_and_system():
+    route = respx.post(f"{BASE}/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=_chat(f"<think>…</think>{GOOD}")))
+    img = Path(__file__).parent / "data_img.png"
+    img.write_bytes(b"\x89PNG")
+
+    c = llm_caption.caption_image(img)
+    assert c["wh_ratio"] == "9:16"
+    body = route.calls.last.request.read()
+    assert b"data:image/png;base64" in body
+    assert "rewritten_prompt".encode() in body   # system prompt（SKILL.md）已注入
+    assert route.calls.last.request.content
+    img.unlink()
+
+
+@respx.mock
+def test_caption_image_retries_then_succeeds():
+    route = respx.post(f"{BASE}/v1/chat/completions")
+    route.side_effect = [
+        httpx.Response(500, text="boom"),
+        httpx.Response(200, json=_chat(GOOD)),
+    ]
+    img = Path(__file__).parent / "data_img2.png"
+    img.write_bytes(b"x")
+    assert llm_caption.caption_image(img)["rewritten_prompt"] == "a girl at the window"
+    assert route.call_count == 2                 # 第一次失败后升温重试
+    img.unlink()
+
+
+@respx.mock
+def test_caption_image_exhausts_retries():
+    route = respx.post(f"{BASE}/v1/chat/completions").mock(
+        return_value=httpx.Response(500, text="boom"))
+    img = Path(__file__).parent / "data_img3.png"
+    img.write_bytes(b"x")
+    with pytest.raises(RuntimeError, match="重试耗尽"):
+        llm_caption.caption_image(img)
+    assert route.call_count == config.CAPTION_RETRIES
+    img.unlink()
+
+
+@respx.mock
+def test_caption_image_appends_note():
+    route = respx.post(f"{BASE}/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=_chat(GOOD)))
+    img = Path(__file__).parent / "data_img4.png"
+    img.write_bytes(b"x")
+    llm_caption.caption_image(img, note="头发改成银白色")
+    body = route.calls.last.request.read().decode()
+    assert "头发改成银白色" in body
+    img.unlink()

@@ -42,14 +42,14 @@ def start_comfy() -> None:
 
 def ensure_comfy() -> None:
     if is_comfy_up():
-        sse.publish("log", text="ComfyUI 已在运行（复用现有实例，结束时不关闭）")
+        sse.hub.publish("log", text="ComfyUI 已在运行（复用现有实例，结束时不关闭）")
         return
-    sse.publish("log", text="启动 ComfyUI（约 1 分钟）…")
+    sse.hub.publish("log", text="启动 ComfyUI（约 1 分钟）…")
     start_comfy()
     deadline = time.time() + config.SERVICE_READY_TIMEOUT
     while time.time() < deadline:
         if is_comfy_up():
-            sse.publish("log", text="ComfyUI 就绪")
+            sse.hub.publish("log", text="ComfyUI 就绪")
             return
         time.sleep(2)
     raise RuntimeError("ComfyUI 启动超时（详见 logs/comfyui.log）")
@@ -62,7 +62,7 @@ def stop_comfy() -> None:
     subprocess.run(["taskkill", "/T", "/F", "/PID", str(_owned_proc.pid)],
                    capture_output=True)
     _owned_proc = None
-    sse.publish("log", text="已关闭代管的 ComfyUI")
+    sse.hub.publish("log", text="已关闭代管的 ComfyUI")
 
 
 # ---------- wh_ratio → 像素（复刻 ResolutionSelector：1MP、multiple=8） ----------
@@ -71,6 +71,8 @@ def wh_ratio_to_px(ratio: str, megapixels: float = 1.0) -> tuple[int, int]:
     if not m:
         raise ValueError(f"wh_ratio 非法：{ratio!r}")
     rw, rh = int(m.group(1)), int(m.group(2))
+    if rw <= 0 or rh <= 0:
+        raise ValueError(f"wh_ratio 边必须为正整数：{ratio!r}")
     scale = math.sqrt(megapixels * 1024 * 1024 / (rw * rh))
     return round(rw * scale / 8) * 8, round(rh * scale / 8) * 8
 

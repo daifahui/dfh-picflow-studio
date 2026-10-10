@@ -22,3 +22,8 @@ node_modules/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# 测试与运行产物
+.coverage
+logs/
+pytest_cache/

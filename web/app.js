@@ -162,10 +162,12 @@ $("#detail-close").onclick = () => $("#detail").classList.remove("open");
 
 $("#btn-save").onclick = async () => {
   const seq = state.selected;
-  await post(`/api/task/items/${seq}`, {
-    rewritten_prompt: $("#detail-prompt").value,
-    wh_ratio: $("#detail-ratio").value,
-    note: $("#detail-note").value });
+  await api(`/api/task/items/${seq}`, {
+    method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      rewritten_prompt: $("#detail-prompt").value,
+      wh_ratio: $("#detail-ratio").value,
+      note: $("#detail-note").value }) });
 };
 $("#btn-recaption").onclick = async () => {
   const seq = state.selected;
