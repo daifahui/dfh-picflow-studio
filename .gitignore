@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 运行产物与大文件 —— 一律不追踪
+outputs/
+uploads/
+tmp/
+*.gguf
+*.safetensors
+*.ckpt
+*.pth
+*.onnx
+*.bin
+
+# 前端（防呆，本项目前端无构建步骤）
+node_modules/
+
+# 系统
+Thumbs.db
+Desktop.ini
+.DS_Store
