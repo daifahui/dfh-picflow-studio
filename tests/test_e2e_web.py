@@ -39,7 +39,7 @@ def server(tmp_path_factory):
     mp.setattr(llm_caption, "stop_llm", lambda: None)
     mp.setattr(llm_caption, "caption_image",
                lambda path, note="": {"rewritten_prompt": "a test prompt, anime style",
-                                      "wh_ratio": "1:1"})
+                                      "wh_ratio": "1:1", "tags": ["test", "anime"]})
     mp.setattr(llm_caption, "generate_task_name", lambda contract: "AI 名称")
     mp.setattr(comfy_client, "ensure_comfy", lambda: None)
     mp.setattr(comfy_client, "stop_comfy", lambda: None)
@@ -172,6 +172,8 @@ def test_detail_sidebar_edit_persists(page, image_dir):
     ta = page.locator("#detail-prompt")
     page.wait_for_function(
         "document.querySelector('#detail-prompt').value !== ''")
+    page.wait_for_function(
+        "document.querySelector('#detail-tags').value === 'test, anime'")
     ta.fill("edited from web test")
     page.click("#btn-save")
     page.click("#detail-close")

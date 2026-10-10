@@ -232,6 +232,9 @@
     <textarea id="detail-prompt" rows="10" x-model="detail.prompt"></textarea>
   </label>
   <label>wh_ratio <input id="detail-ratio" x-model="detail.ratio"></label>
+  <label>标签（逗号分隔，保存后同步 LoRA sidecar）
+    <input id="detail-tags" x-model="detail.tags">
+  </label>
   <label>注释（重新提取时附加给模型）
     <textarea id="detail-note" rows="3" x-model="detail.note"
               placeholder="例：头发改成银白色，不要手表"></textarea>

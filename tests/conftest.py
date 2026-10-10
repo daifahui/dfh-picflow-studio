@@ -22,7 +22,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 from server import comfy_client, llm_caption, main  # noqa: E402
 from server.state import manager  # noqa: E402
 
-FAKE_CONTRACT = {"rewritten_prompt": "a test prompt, anime style", "wh_ratio": "1:1"}
+FAKE_CONTRACT = {"rewritten_prompt": "a test prompt, anime style",
+                 "wh_ratio": "1:1", "tags": ["test", "anime"]}
 
 
 def make_png(w: int = 64, h: int = 64) -> bytes:

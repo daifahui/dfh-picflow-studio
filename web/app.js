@@ -21,7 +21,7 @@ function studio() {
     ],
     wsInput: "",
     detailOpen: false,
-    detail: { seq: 0, prompt: "", ratio: "", note: "", out_image: "" },
+    detail: { seq: 0, prompt: "", ratio: "", tags: "", note: "", out_image: "" },
     lightboxUrl: "",
     typed: "",                            // 打字机渐显的最新提示词（队列页）
     viewMode: localStorage.getItem("ps-view-mode") || "lg",
@@ -332,8 +332,9 @@ function studio() {
       const it = (this.itemsCache[this.sel] || []).find((x) => x.seq === seq);
       if (!it) return;
       this.detail = { seq, prompt: it.contract?.rewritten_prompt || "",
-                      ratio: it.contract?.wh_ratio || "", note: it.note || "",
-                      out_image: it.out_image || "" };
+                      ratio: it.contract?.wh_ratio || "",
+                      tags: (it.contract?.tags || []).join(", "),
+                      note: it.note || "", out_image: it.out_image || "" };
       this.detailOpen = true;
     },
     detailStatus() {
@@ -351,6 +352,7 @@ function studio() {
         method: "PUT", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ rewritten_prompt: this.detail.prompt,
                                wh_ratio: this.detail.ratio,
+                               tags: this.detail.tags,
                                note: this.detail.note }) });
     },
     async recaptionDetail() {

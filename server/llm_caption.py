@@ -97,6 +97,26 @@ _THINK = re.compile(r"<think>.*?</think>", re.S)
 _JSON = re.compile(r"\{.*\}", re.S)
 _RATIO = re.compile(r"^\s*\d+\s*:\s*\d+\s*$")
 
+TAGS_MAX = 12          # 标签数上限（§17）
+TAG_LEN_MAX = 40       # 单个标签长度上限
+
+
+def _normalize_tags(raw) -> list[str]:
+    """tags 容错规范化：数组或逗号分隔字符串 → 干净的小写短语数组（§17.1）。"""
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw:
+        for t in str(item).split(","):
+            t = t.strip().lower()
+            if t and t not in out:
+                out.append(t[:TAG_LEN_MAX])
+            if len(out) >= TAGS_MAX:
+                return out
+    return out
+
 
 _PASSTHRU = {"png", "jpg", "jpeg"}     # llama-server 端 stb_image 原生支持的格式
 
@@ -126,12 +146,18 @@ def _parse_contract(text: str) -> dict:
         raise ValueError("rewritten_prompt 为空")
     if not _RATIO.match(ratio):
         raise ValueError(f"wh_ratio 非法：{ratio!r}")
-    return {"rewritten_prompt": prompt, "wh_ratio": ratio}
+    return {"rewritten_prompt": prompt, "wh_ratio": ratio,
+            "tags": _normalize_tags(contract.get("tags"))}
 
 
 def caption_image(image_path: Path, note: str = "") -> dict:
-    """单张图 → 契约 JSON。带注释时按"修正改写"语气追加。失败重试并升温。"""
-    user_text = "请按系统提示词的契约处理这张图片，输出 rewritten_prompt 与 wh_ratio。"
+    """单张图 → 契约 JSON（rewritten_prompt / wh_ratio / tags）。带注释时按
+    "修正改写"语气追加。失败重试并升温。"""
+    user_text = (
+        "请按系统提示词的契约处理这张图片，输出 rewritten_prompt 与 wh_ratio。\n"
+        "另请额外输出 tags 字段：4 到 12 个英文小写短语标签（逗号分隔的数组），"
+        "概括图中的主体、服装、动作、场景、画风与光影，例如 "
+        '["1girl", "blue hair", "night city", "window side light"]。')
     if note:
         user_text += f"\n用户注释（务必体现在改写结果中）：{note}"
     payload = {

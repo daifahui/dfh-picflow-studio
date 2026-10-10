@@ -22,7 +22,28 @@ GOOD = json.dumps({"rewritten_prompt": "a girl at the window", "wh_ratio": "9:16
 
 def test_parse_plain_json():
     assert llm_caption._parse_contract(GOOD) == {
-        "rewritten_prompt": "a girl at the window", "wh_ratio": "9:16"}
+        "rewritten_prompt": "a girl at the window", "wh_ratio": "9:16", "tags": []}
+
+
+# ---------- tags 规范化（§17） ----------
+def test_parse_tags_variants():
+    c = llm_caption._parse_contract(
+        '{"rewritten_prompt": "x", "wh_ratio": "1:1",'
+        ' "tags": ["Girl", "blue hair", ""]}')
+    assert c["tags"] == ["girl", "blue hair"]              # 小写化 + 去空
+    c = llm_caption._parse_contract(
+        '{"rewritten_prompt": "x", "wh_ratio": "1:1", "tags": "a, b ,c"}')
+    assert c["tags"] == ["a", "b", "c"]                    # 逗号字符串
+    c = llm_caption._parse_contract(
+        '{"rewritten_prompt": "x", "wh_ratio": "1:1", "tags": ["a, b", "c"]}')
+    assert c["tags"] == ["a", "b", "c"]                    # 数组项内嵌逗号也拆分
+    c = llm_caption._parse_contract(
+        '{"rewritten_prompt": "x", "wh_ratio": "1:1", "tags": 123}')
+    assert c["tags"] == []                                 # 坏类型兜底
+    many = ", ".join(f"t{i}" for i in range(20))
+    c = llm_caption._parse_contract(
+        '{"rewritten_prompt": "x", "wh_ratio": "1:1", "tags": "%s"}' % many)
+    assert len(c["tags"]) == llm_caption.TAGS_MAX          # 超量截断
 
 
 def test_parse_strips_think_block():

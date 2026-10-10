@@ -350,6 +350,16 @@ def _append_summary(t: Task, it: Item) -> None:
     (pdir / f"{it.seq:04d}.json").write_text(
         json.dumps({"file": it.src_filename, **it.contract}, ensure_ascii=False, indent=1),
         encoding="utf-8")
+    _write_tags_sidecar(t, it)
+
+
+def _write_tags_sidecar(t: Task, it: Item) -> None:
+    """LoRA 训练惯例的标签 sidecar：<提示词输出>/tags/NNNN.txt（§17.2）。"""
+    tags = (it.contract or {}).get("tags") or []
+    tags_dir = t.prompts_dir / "tags"
+    tags_dir.mkdir(parents=True, exist_ok=True)
+    (tags_dir / f"{it.seq:04d}.txt").write_text(
+        ", ".join(str(x) for x in tags), encoding="utf-8")
 
 
 # ---------- 队列 worker（阶段批处理） ----------
@@ -537,18 +547,23 @@ def update_item(tid: str, seq: int, body: dict = Body(...)) -> dict:
         raise HTTPException(404, "条目不存在")
     t, it = found
     with manager.lock:
-        if "rewritten_prompt" in body or "wh_ratio" in body:
+        if "rewritten_prompt" in body or "wh_ratio" in body or "tags" in body:
             contract = dict(it.contract or {})
             if "rewritten_prompt" in body:
                 contract["rewritten_prompt"] = str(body["rewritten_prompt"]).strip()
             if "wh_ratio" in body:
                 contract["wh_ratio"] = str(body["wh_ratio"]).strip()
+            if "tags" in body:
+                from .llm_caption import _normalize_tags
+                contract["tags"] = _normalize_tags(body["tags"])
             it.contract = contract
         if "note" in body:
             it.note = str(body["note"])
         if it.status == "caption_failed":
             manager.set_status(t, it, "pending")
     manager.save_task(t)
+    if "tags" in body and it.contract:
+        _write_tags_sidecar(t, it)                    # 标签编辑同步重写 sidecar（§17.3）
     _pub_item(t, it)
     return {"ok": True}
 

@@ -299,7 +299,8 @@ def test_update_item_contract_and_note(client, image_dir, stub_external):
         "rewritten_prompt": "edited prompt", "wh_ratio": "3:4", "note": "n1"})
     assert r.status_code == 200
     it = client.get(f"/api/tasks/{tid}").json()["items"][0]
-    assert it["contract"] == {"rewritten_prompt": "edited prompt", "wh_ratio": "3:4"}
+    assert it["contract"] == {"rewritten_prompt": "edited prompt", "wh_ratio": "3:4",
+                              "tags": ["test", "anime"]}   # 未动 tags 保持原样
     assert it["note"] == "n1"
 
 
@@ -336,6 +337,31 @@ def test_generate_writes_to_custom_output_dirs(client, image_dir, stub_external,
     assert (img_out / data["items"][0]["out_image"]).exists()
     assert (prompt_out / "0001.json").exists()
     assert client.get(f"/api/tasks/{tid}/img/out/1").status_code == 200
+
+
+# ---------- 标签 tags（§17） ----------
+def test_tags_sidecar_written_and_edited(client, image_dir, stub_external):
+    """caption 落盘 sidecar txt；手动编辑标签后 json 与 txt 同步。"""
+    tid = import_task(client, image_dir, name="tags")
+    client.post(f"/api/tasks/{tid}/caption")
+    wait_task_phase(client, tid, "reviewing")
+
+    from server.state import manager
+    pdir = manager.task(tid).prompts_dir
+    assert (pdir / "tags" / "0001.txt").read_text(encoding="utf-8") == "test, anime"
+    d = json.loads((pdir / "0001.json").read_text(encoding="utf-8"))
+    assert d["tags"] == ["test", "anime"]
+    line = (pdir / "prompts_summary.jsonl").read_text(
+        encoding="utf-8").strip().splitlines()[0]
+    assert json.loads(line)["tags"] == ["test", "anime"]
+
+    r = client.put(f"/api/tasks/{tid}/items/1",
+                   json={"tags": "Silver hair, night,  city"})
+    assert r.status_code == 200
+    it = client.get(f"/api/tasks/{tid}").json()["items"][0]
+    assert it["contract"]["tags"] == ["silver hair", "night", "city"]
+    assert (pdir / "tags" / "0001.txt").read_text(
+        encoding="utf-8") == "silver hair, night, city"
 
 
 # ---------- 图片服务与安全边界 ----------
