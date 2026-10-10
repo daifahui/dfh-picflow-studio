@@ -160,3 +160,32 @@ def caption_image(image_path: Path, note: str = "") -> dict:
             last_err = e
             sse.hub.publish("log", text=f"[caption] 第 {attempt + 1} 次失败：{e}")
     raise RuntimeError(f"caption 重试耗尽：{last_err}")
+
+
+# ---------- AI 任务命名（§16.4） ----------
+def generate_task_name(contract: dict) -> str:
+    """首图契约 → 4-12 字任务名。任何失败返回空串（保留占位名，不抛出）。"""
+    payload = {
+        "model": config.LM_MODEL_ALIAS,
+        "messages": [
+            {"role": "system", "content":
+                "你是命名助手。根据生图提示词起一个4到12个字的中文短名，"
+                "概括画面主体与场景。只输出名称本身，不要解释，不要引号和句号。"},
+            {"role": "user", "content":
+                f"提示词：{str(contract.get('rewritten_prompt', ''))[:600]}"},
+        ],
+        "max_tokens": 512,
+        "temperature": 0.7,
+    }
+    try:
+        r = httpx.post(f"{config.LM_API_BASE}/v1/chat/completions",
+                       json=payload, timeout=120)
+        r.raise_for_status()
+        content = r.json()["choices"][0]["message"]["content"]
+    except Exception:                                     # noqa: BLE001 —— 命名失败不致命
+        return ""
+    text = _THINK.sub("", content).strip()
+    line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+    line = line.strip("「」\"'。.，,！!？?：: 　")
+    line = re.sub(r'[\\/:*?"<>|]', "_", line)
+    return line[:24]

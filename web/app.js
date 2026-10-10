@@ -1,284 +1,369 @@
-/* Prompt Studio 前端逻辑 */
+/* Prompt Studio 前端（Alpine.js 组件）：工作区/队列/审阅/结果 三视图。 */
 "use strict";
 
-const $ = (sel) => document.querySelector(sel);
-const api = async (path, opts) => {
-  const r = await fetch(path, opts);
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
-  return r.json();
-};
+function studio() {
+  return {
+    /* ---------- 状态 ---------- */
+    view: "queue",
+    health: { llm: false, comfy: false },
+    ws: { workspace: "", running: false, gate: false, paused: false, queue: [] },
+    itemsCache: {},                       // task_id -> items[]（懒加载 + SSE 增量）
+    sel: "",                              // 审阅/详情当前任务
+    resultFilter: "all",
+    progress: {},                         // task_id -> {done,total,filename,phase}
+    imp: { path: "", name: "", mode: "auto", aiName: true,
+           imgDir: "", promptDir: "", params: {} },
+    paramFields: [
+      ["steps", "步数", "number"], ["sampler", "采样器", "text"],
+      ["scheduler", "调度器", "text"], ["cfg", "cfg", "number"],
+      ["megapixels", "百万像素", "number"], ["seed", "种子", "number"],
+      ["close_services_after", "完成后关闭服务", "checkbox"],
+    ],
+    wsInput: "",
+    detailOpen: false,
+    detail: { seq: 0, prompt: "", ratio: "", note: "", out_image: "" },
+    lightboxUrl: "",
+    typed: "",                            // 打字机渐显的最新提示词（队列页）
+    viewMode: localStorage.getItem("ps-view-mode") || "lg",
+    resultTick: 0,
 
-const state = { task: null, items: [], selected: 0 };
+    /* ---------- 初始化 ---------- */
+    async init() {
+      try {
+        const d = await this.api("/api/defaults");
+        this.imp.params = { ...d };
+        const ws = await this.api("/api/workspace");
+        this.applyWs(ws);
+      } catch (e) { this.addLog("[warn] 初始化失败：" + e.message); }
+      this.pollHealth();
+      setInterval(() => this.pollHealth(), 5000);
+      const es = new EventSource("/api/task/events");
+      es.onmessage = (ev) => {
+        try {
+          // 外部回调 → CustomEvent 桥接，保证在 Alpine 响应式作用域内求值
+          window.dispatchEvent(new CustomEvent("ps-sse", { detail: JSON.parse(ev.data) }));
+        } catch { /* 非 JSON 心跳等 */ }
+      };
+      es.onerror = () => this.addLog("[warn] SSE 断线，3s 后自动重连");
+      window.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") { this.lightboxUrl = ""; }
+      });
+    },
 
-/* ---------- 视图切换 ---------- */
-function show(view) {
-  for (const v of ["task", "review", "result"])
-    $("#view-" + v).classList.toggle("hidden", v !== view);
-  for (const b of document.querySelectorAll("#tabs button"))
-    b.classList.toggle("on", b.dataset.view === view);
-}
-document.querySelectorAll("#tabs button").forEach(
-  (b) => (b.onclick = () => show(b.dataset.view)));
+    onSse(d) { this.onEvent(d); },
 
-/* ---------- 健康状态 ---------- */
-async function pollHealth() {
-  try {
-    const h = await api("/api/health");
-    $("#health").innerHTML =
-      `LLM <b class="${h.llm ? "on" : "off"}">${h.llm ? "运行中" : "未启动"}</b>　` +
-      `ComfyUI <b class="${h.comfy ? "on" : "off"}">${h.comfy ? "运行中" : "未启动"}</b>`;
-  } catch { $("#health").textContent = "服务未连接"; }
-}
-setInterval(pollHealth, 5000);
+    /* ---------- 工具 ---------- */
+    async api(path, opts) {
+      const r = await fetch(path, opts);
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.detail || r.statusText);
+      }
+      return r.json();
+    },
+    post(p, body = {}) {
+      return this.api(p, { method: "POST",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    },
+    addLog(text) {
+      const el = document.querySelector("#logs");
+      if (!el) return;
+      const line = document.createElement("div");
+      line.textContent = `[${new Date().toLocaleTimeString()}] ${text}`;
+      el.appendChild(line);
+      el.scrollTop = el.scrollHeight;
+      while (el.children.length > 200) el.firstChild.remove();
+    },
+    shortPath(p) {
+      p = String(p || "");
+      return p.length > 46 ? "…" + p.slice(-45) : p;
+    },
+    taskShort(tid) {
+      const t = this.ws.queue.find((x) => x.id === tid);
+      return t ? t.name : tid;
+    },
 
-/* ---------- 参数表单 ---------- */
-const PARAM_FIELDS = [
-  ["steps", "步数", "number"], ["sampler", "采样器", "text"],
-  ["scheduler", "调度器", "text"], ["cfg", "cfg", "number"],
-  ["megapixels", "百万像素", "number"], ["seed", "种子", "number"],
-  ["close_services_after", "完成后关闭服务", "checkbox"],
-];
-function buildParams(defaults) {
-  $("#params").innerHTML = PARAM_FIELDS.map(([k, label, type]) => {
-    if (type === "checkbox")
-      return `<label>${label}<input type="checkbox" data-p="${k}" ${defaults[k] ? "checked" : ""}></label>`;
-    return `<label>${label}<input type="${type}" data-p="${k}" value="${defaults[k] ?? ""}" step="any"></label>`;
-  }).join("");
-}
-function readParams() {
-  const out = {};
-  for (const el of document.querySelectorAll("[data-p]")) {
-    out[el.dataset.p] = el.type === "checkbox" ? el.checked : Number(el.value) || el.value;
-  }
-  return out;
-}
+    /* ---------- 视图 ---------- */
+    show(v) {
+      this.view = v;
+      if (v === "result") this.ensureResultItems();
+    },
+    setViewMode(m) {
+      this.viewMode = m;
+      localStorage.setItem("ps-view-mode", m);
+    },
+    viewModeClass() { return "view-" + this.viewMode; },
 
-/* ---------- 任务创建 ---------- */
-$("#btn-browse").onclick = async () => {
-  const r = await api("/api/browse/dir", { method: "POST" });
-  if (r.path) $("#src-path").value = r.path;
-};
+    /* ---------- 健康轮询 ---------- */
+    async pollHealth() {
+      try { this.health = await this.api("/api/health"); }
+      catch { /* 服务未连接 */ }
+    },
 
-async function createTask() {
-  let source = $("#src-path").value.trim();
-  const fileEl = $("#src-file").files[0];
-  if (fileEl) {
-    const fd = new FormData();
-    fd.append("file", fileEl);
-    const up = await api("/api/upload", { method: "POST", body: fd });
-    source = up.path;
-  }
-  if (!source) throw new Error("请填写路径或上传压缩包");
-  const body = { source, name: $("#task-name").value.trim(),
-                 params: readParams(),
-                 output_image_dir: $("#out-img-dir").value.trim(),
-                 output_prompt_dir: $("#out-prompt-dir").value.trim() };
-  const r = await api("/api/task", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body) });
-  applyTask(r);
-  show("review");
-}
+    /* ---------- SSE（onSse 桥接已在 onmessage 完成 JSON 解析） ---------- */
+    onEvent(d) {
+      if (d.event === "queue") {
+        this.applyWs(d);
+      } else if (d.event === "item") {
+        const items = this.itemsCache[d.task_id];
+        if (items) {
+          const i = items.findIndex((x) => x.seq === d.seq);
+          if (i >= 0) items[i] = d; else items.push(d);
+        }
+        if (d.task_id === this.sel) this.resultTick++;       // 触发详情/网格刷新
+        if (d.contract && this.ws.running &&
+            this.progress[d.task_id] && this.typewrite) {
+          this.typewrite(d.contract.rewritten_prompt);
+        }
+      } else if (d.event === "progress") {
+        this.progress[d.task_id] = d;
+      } else if (d.event === "phase") {
+        if (d.task_id === this.sel) this.resultTick++;
+      } else if (d.event === "log") {
+        this.addLog(d.text);
+      }
+    },
+    applyWs(ws) {
+      if (!ws || !Array.isArray(ws.queue)) return;      // 动作类响应不含状态，忽略
+      this.ws = ws;
+      if (this.sel && !ws.queue.some((t) => t.id === this.sel)) {
+        const first = ws.queue[0];
+        if (first) this.sel = first.id; else this.sel = "";
+      }
+      if (!this.sel && ws.queue.length) this.sel = ws.queue[0].id;
+      if (this.wsInput === "") this.wsInput = ws.workspace;
+    },
+    async refreshWs() {
+      try { this.applyWs(await this.api("/api/workspace")); } catch { /* 忽略 */ }
+    },
+    typewrite(text) {
+      this.typed = "";
+      clearInterval(this._twTimer);
+      let i = 0;
+      const step = Math.max(1, Math.round(text.length / 120));
+      this._twTimer = setInterval(() => {
+        i = Math.min(text.length, i + step);
+        this.typed = text.slice(0, i);
+        if (i >= text.length) clearInterval(this._twTimer);
+      }, 40);
+    },
 
-/* ---------- 三个启动按钮 ---------- */
-const post = (p, body = {}) => api(p, {
-  method: "POST", headers: { "Content-Type": "application/json" },
-  body: JSON.stringify(body) });
+    /* ---------- 工作区 ---------- */
+    async browseWorkspace() {
+      const r = await this.post("/api/browse/dir");
+      if (r.path) this.wsInput = r.path;
+    },
+    async applyWorkspace() {
+      try {
+        this.applyWs(await this.post("/api/workspace", { path: this.wsInput }));
+        this.itemsCache = {};
+      } catch (e) { alert(e.message); }
+    },
 
-$("#btn-caption").onclick = async () => {
-  try { if (!state.task) await createTask(); await post("/api/task/caption"); }
-  catch (e) { alert(e.message); }
-};
-$("#btn-auto").onclick = async () => {
-  if (!confirm("全自动模式：提取全部提示词后直接开始生成全部图片，中途不审阅。继续？"))
-    return;
-  try { if (!state.task) await createTask(); await post("/api/task/auto"); }
-  catch (e) { alert(e.message); }
-};
-$("#btn-generate-all").onclick = () => {
-  if (!confirm("将全部已提取的提示词入队 ComfyUI 生成。继续？")) return;
-  post("/api/task/generate").catch((e) => alert(e.message));
-};
-$("#btn-stop").onclick = () => post("/api/task/stop").catch((e) => alert(e.message));
+    /* ---------- 导入 ---------- */
+    async browseImport() {
+      const r = await this.post("/api/browse/dir");
+      if (r.path) this.imp.path = r.path;
+    },
+    async importTask(start) {
+      try {
+        let source = this.imp.path.trim();
+        const fileEl = document.querySelector("#import-file").files[0];
+        if (fileEl) {
+          const fd = new FormData();
+          fd.append("file", fileEl);
+          const up = await this.api("/api/upload", { method: "POST", body: fd });
+          source = up.path;
+        }
+        if (!source) throw new Error("请填写路径或上传压缩包");
+        const st = await this.post("/api/queue/items", { items: [{
+          source, name: this.imp.name.trim(), mode: this.imp.mode,
+          ai_name: this.imp.aiName,
+          output_image_dir: this.imp.imgDir.trim(),
+          output_prompt_dir: this.imp.promptDir.trim(),
+          params: this.imp.params,
+        }] });
+        this.applyWs(st);
+        this.addLog("已加入队列：" + st.created[0].name);
+        this.imp.path = ""; this.imp.name = "";
+        this.imp.imgDir = ""; this.imp.promptDir = "";
+        document.querySelector("#import-file").value = "";
+        if (start) await this.queueStart();
+        this.show("queue");
+      } catch (e) { alert(e.message); }
+    },
 
-/* ---------- 渲染 ---------- */
-const STATUS_TAG = {
-  pending: "待提取", captioning: "提取中", captioned: "已提取",
-  generating: "生成中", done: "完成",
-  caption_failed: "提取失败", generate_failed: "生成失败",
-};
+    /* ---------- 队列 ---------- */
+    async queueStart() {
+      try { await this.post("/api/queue/start"); await this.refreshWs(); }
+      catch (e) { alert(e.message); }
+    },
+    async queueResume() {
+      try { await this.post("/api/queue/resume"); await this.refreshWs(); }
+      catch (e) { alert(e.message); }
+    },
+    async queuePause() {
+      try { await this.post("/api/queue/pause"); await this.refreshWs(); }
+      catch (e) { alert(e.message); }
+    },
+    async queueStop() {
+      try { await this.post("/api/queue/stop"); await this.refreshWs(); }
+      catch (e) { alert(e.message); }
+    },
+    async renameTask(tid, name) {
+      try {
+        await this.post(`/api/tasks/${tid}/rename`, { name });
+        await this.refreshWs();
+        if (this.sel === tid) this.sel = name;          // id 跟随目录名
+      } catch (e) {
+        alert(e.message);
+        this.resultTick++;                      // 输入框回退到旧名
+      }
+    },
+    async removeTask(tid) {
+      try { await this.api(`/api/tasks/${tid}`, { method: "DELETE" }); await this.refreshWs(); }
+      catch (e) { alert(e.message); }
+    },
+    queueLabel() {
+      const n = this.ws.queue.length;
+      if (!n) return "";
+      if (this.ws.gate) return "（审阅闸：等待放行）";
+      if (this.ws.running) return "（运行中）";
+      if (this.ws.paused) return "（已暂停，点「继续」恢复）";
+      return `（${n} 个任务）`;
+    },
+    phaseLabel(p) {
+      return { idle: "排队中", captioning: "提取中", reviewing: "待审阅/已提取",
+               generating: "生成中", done: "完成", stopped: "已停止" }[p] || p || "";
+    },
+    statusLabel(s) {
+      return { pending: "待提取", captioning: "提取中", captioned: "已提取",
+               generating: "生成中", done: "完成",
+               caption_failed: "提取失败", generate_failed: "生成失败" }[s] || s;
+    },
+    pct(t) {
+      const total = t.total || 1;
+      return Math.round(((t.counts.done + t.counts.captioned) / total) * 100);
+    },
+    countsLabel(t) {
+      const c = t.counts;
+      const bits = [`${c.done}/${t.total} 完成`];
+      if (c.failed) bits.push(`${c.failed} 失败`);
+      return bits.join(" · ");
+    },
+    cellClass(it) {
+      return it.status.endsWith("failed") ? "failed"
+           : it.status === "done" ? "done"
+           : it.status === "captioned" ? "captioned" : it.status;
+    },
+    metaText(it) {
+      const bits = [];
+      if (it.wh_ratio) bits.push(it.wh_ratio);
+      if (it.caption_ms) bits.push(`提取 ${(it.caption_ms / 1000).toFixed(1)}s`);
+      if (it.generate_ms) bits.push(`生成 ${(it.generate_ms / 1000).toFixed(1)}s`);
+      return bits.join(" · ");
+    },
 
-function cellHTML(it) {
-  const cls = it.status.endsWith("failed") ? "failed"
-            : it.status === "done" ? "done"
-            : it.status === "captioned" ? "captioned" : it.status;
-  const times =
-    (it.caption_ms ? `提取 ${(it.caption_ms / 1000).toFixed(1)}s` : "") +
-    (it.caption_ms && it.generate_ms ? " · " : "") +
-    (it.generate_ms ? `生成 ${(it.generate_ms / 1000).toFixed(1)}s` : "");
-  return `<div class="cell ${cls}" data-seq="${it.seq}">
-    <img loading="lazy" src="/api/img/thumb/${it.seq}" alt=""
-         onload="this.classList.add('ld')">
-    <span class="tag">${STATUS_TAG[it.status] || it.status}</span>
-    <span class="meta">${it.wh_ratio || ""}${times ? "　" + times : ""}</span>
-    <span class="name">${it.seq}_${it.src_filename}</span></div>`;
-}
+    /* ---------- 审阅页 ---------- */
+    async openTask(tid) {
+      this.sel = tid;
+      await this.refreshTaskItems(tid);
+      this.show("review");
+    },
+    async refreshTaskItems(tid) {
+      try {
+        const d = await this.api(`/api/tasks/${tid}`);
+        this.itemsCache[tid] = d.items;
+        this.resultTick++;
+      } catch { /* 任务可能已被移除 */ }
+    },
+    curItems() { return this.itemsCache[this.sel] || []; },
+    taskName() {
+      const t = this.ws.queue.find((x) => x.id === this.sel);
+      return t ? t.name : this.sel || "（未选任务）";
+    },
+    taskPhase() {
+      const t = this.ws.queue.find((x) => x.id === this.sel);
+      return t ? t.phase : "";
+    },
+    taskPct() {
+      const t = this.ws.queue.find((x) => x.id === this.sel);
+      return t ? this.pct(t) : 0;
+    },
+    progressText() {
+      const p = this.progress[this.sel];
+      if (!p) return "等待任务";
+      return `${p.done}/${p.total} · ${p.filename}`;
+    },
+    async generateAll() {
+      try { await this.post(`/api/tasks/${this.sel}/generate`); }
+      catch (e) { alert(e.message); }
+    },
+    async stopTask() {
+      try { await this.post(`/api/tasks/${this.sel}/stop`); }
+      catch (e) { alert(e.message); }
+    },
 
-function renderGrid() {
-  $("#item-count").textContent = `（${state.items.length} 张）`;
-  $("#grid").innerHTML = state.items.map(cellHTML).join("");
-  $("#grid").querySelectorAll(".cell").forEach(
-    (c) => (c.onclick = () => openDetail(+c.dataset.seq)));
-  renderResult();
-}
+    /* ---------- 结果页 ---------- */
+    ensureResultItems() {
+      for (const t of this.ws.queue) {
+        const ok = t.phase === "done" || t.counts.done > 0;
+        if (ok && !this.itemsCache[t.id]) this.refreshTaskItems(t.id);
+      }
+    },
+    doneItems() {
+      this.resultTick;                                 // 响应式依赖
+      const rows = [];
+      for (const t of this.ws.queue) {
+        if (this.resultFilter !== "all" && this.resultFilter !== t.id) continue;
+        for (const it of this.itemsCache[t.id] || []) {
+          if (it.status === "done") rows.push({ tid: t.id, it });
+        }
+      }
+      return rows;
+    },
 
-function renderResult() {
-  const done = state.items.filter((i) => i.status === "done");
-  $("#result-grid").innerHTML = done.length
-    ? done.map(cellHTML).join("")
-    : `<p class="hint">尚无完成项</p>`;
-  $("#result-grid").querySelectorAll(".cell").forEach(
-    (c) => (c.onclick = () => openDetail(+c.dataset.seq)));
-}
-
-function applyTask(data) {
-  state.task = data.task;
-  state.items = data.items || [];
-  renderGrid();
-  updatePhase(state.task.phase);
-}
-
-/* ---------- 详情侧栏 ---------- */
-function openDetail(seq) {
-  const it = state.items.find((i) => i.seq === seq);
-  if (!it) return;
-  state.selected = seq;
-  $("#detail-src").src = `/api/img/src/${seq}`;
-  $("#detail-out").src = it.out_image ? `/api/img/out/${seq}` : "";
-  $("#detail-out-wrap").style.visibility = it.out_image ? "visible" : "hidden";
-  $("#detail-prompt").value = it.contract?.rewritten_prompt || "";
-  $("#detail-ratio").value = it.contract?.wh_ratio || "";
-  $("#detail-note").value = it.note || "";
-  $("#detail-status").textContent =
-    `${STATUS_TAG[it.status] || it.status}` +
-    (it.error ? ` · ${it.error}` : "") +
-    (it.caption_ms ? ` · 提取 ${(it.caption_ms / 1000).toFixed(1)}s` : "") +
-    (it.generate_ms ? ` · 生成 ${(it.generate_ms / 1000).toFixed(1)}s` : "");
-  $("#detail").classList.add("open");
-}
-$("#detail-close").onclick = () => $("#detail").classList.remove("open");
-
-/* ---------- lightbox（点击侧栏大图全屏预览，Esc/点击关闭） ---------- */
-const lightbox = $("#lightbox");
-function openLightbox(src) { $("#lightbox-img").src = src; lightbox.classList.add("open"); }
-lightbox.onclick = () => lightbox.classList.remove("open");
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") lightbox.classList.remove("open");
-});
-$("#detail-src").onclick = () => openLightbox($("#detail-src").src);
-$("#detail-out").onclick = () => {
-  if ($("#detail-out-wrap").style.visibility !== "hidden")
-    openLightbox($("#detail-out").src);
-};
-
-/* ---------- 视图切换（大/中/小图标、列表、详细信息，仿资源管理器） ---------- */
-const VIEW_CLASS = { lg: "view-lg", md: "view-md", sm: "view-sm",
-                     list: "view-list", details: "view-details" };
-function applyViewMode(mode) {
-  if (!VIEW_CLASS[mode]) mode = "lg";
-  for (const grid of [$("#grid"), $("#result-grid")]) {
-    grid.classList.remove(...Object.values(VIEW_CLASS));
-    grid.classList.add(VIEW_CLASS[mode]);
-  }
-  localStorage.setItem("ps-view-mode", mode);
-}
-for (const sel of [$("#view-mode"), $("#view-mode-result")]) {
-  sel.onchange = (e) => {
-    applyViewMode(e.target.value);
-    for (const other of [$("#view-mode"), $("#view-mode-result")])
-      other.value = e.target.value;
+    /* ---------- 详情侧栏 ---------- */
+    openDetail(seq, tid) {
+      if (tid && tid !== this.sel) {
+        this.sel = tid;
+        if (!this.itemsCache[tid]) this.refreshTaskItems(tid);
+      }
+      const it = (this.itemsCache[this.sel] || []).find((x) => x.seq === seq);
+      if (!it) return;
+      this.detail = { seq, prompt: it.contract?.rewritten_prompt || "",
+                      ratio: it.contract?.wh_ratio || "", note: it.note || "",
+                      out_image: it.out_image || "" };
+      this.detailOpen = true;
+    },
+    detailStatus() {
+      const it = (this.itemsCache[this.sel] || []).find(
+        (x) => x.seq === this.detail.seq);
+      if (!it) return "";
+      const bits = [this.statusLabel(it.status)];
+      if (it.error) bits.push(it.error);
+      if (it.caption_ms) bits.push(`提取 ${(it.caption_ms / 1000).toFixed(1)}s`);
+      if (it.generate_ms) bits.push(`生成 ${(it.generate_ms / 1000).toFixed(1)}s`);
+      return bits.join(" · ");
+    },
+    async saveDetail() {
+      await this.api(`/api/tasks/${this.sel}/items/${this.detail.seq}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rewritten_prompt: this.detail.prompt,
+                               wh_ratio: this.detail.ratio,
+                               note: this.detail.note }) });
+    },
+    async recaptionDetail() {
+      await this.post(`/api/tasks/${this.sel}/items/${this.detail.seq}/recaption`,
+                      { note: this.detail.note });
+    },
+    async genOne() {
+      await this.post(`/api/tasks/${this.sel}/items/${this.detail.seq}`, {
+        rewritten_prompt: this.detail.prompt, wh_ratio: this.detail.ratio });
+      await this.post(`/api/tasks/${this.sel}/items/${this.detail.seq}/generate`);
+    },
   };
 }
-applyViewMode(localStorage.getItem("ps-view-mode") || "lg");
-for (const sel of [$("#view-mode"), $("#view-mode-result")]) sel.value =
-  localStorage.getItem("ps-view-mode") || "lg";
 
-$("#btn-save").onclick = async () => {
-  const seq = state.selected;
-  await api(`/api/task/items/${seq}`, {
-    method: "PUT", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      rewritten_prompt: $("#detail-prompt").value,
-      wh_ratio: $("#detail-ratio").value,
-      note: $("#detail-note").value }) });
-};
-$("#btn-recaption").onclick = async () => {
-  const seq = state.selected;
-  await post(`/api/task/items/${seq}`, { note: $("#detail-note").value });
-  await post(`/api/task/items/${seq}/recaption`, { note: $("#detail-note").value });
-};
-$("#btn-gen-one").onclick = async () => {
-  const seq = state.selected;
-  await post(`/api/task/items/${seq}`, {
-    rewritten_prompt: $("#detail-prompt").value,
-    wh_ratio: $("#detail-ratio").value });
-  await post(`/api/task/items/${seq}/generate`);
-};
-
-/* ---------- SSE ---------- */
-const PHASE_LABEL = {
-  idle: "空闲", captioning: "阶段一：提取提示词", reviewing: "审阅就绪",
-  generating: "阶段二：ComfyUI 生成", done: "全部完成", stopped: "已停止",
-};
-
-function updatePhase(phase) {
-  $("#phase-label").textContent = PHASE_LABEL[phase] || phase;
-  $("#btn-generate-all").disabled = phase === "generating" || phase === "captioning";
-  $("#btn-stop").disabled = !["captioning", "generating"].includes(phase);
-}
-
-function onEvent(ev) {
-  const d = JSON.parse(ev.data);
-  if (d.event === "log") addLog(d.text);
-  else if (d.event === "phase") {
-    updatePhase(d.phase);
-    addLog(`── 进入阶段：${PHASE_LABEL[d.phase] || d.phase}`);
-    if (d.phase === "reviewing") show("review");
-    if (d.phase === "done") { refreshTask(); show("result"); }
-  }
-  else if (d.event === "progress") {
-    $("#progress-bar").style.width = `${(d.done / d.total) * 100}%`;
-    $("#progress-text").textContent =
-      `${d.done}/${d.total} · ${d.filename}`;
-  }
-  else if (d.event === "item") {
-    const i = state.items.findIndex((x) => x.seq === d.seq);
-    if (i >= 0) state.items[i] = d;
-    renderGrid();
-    if (state.selected === d.seq && $("#detail").classList.contains("open"))
-      openDetail(d.seq);
-  }
-}
-
-function addLog(text) {
-  const el = $("#logs");
-  const line = document.createElement("div");
-  line.textContent = `[${new Date().toLocaleTimeString()}] ${text}`;
-  el.appendChild(line);
-  el.scrollTop = el.scrollHeight;
-  while (el.children.length > 200) el.firstChild.remove();
-}
-
-async function refreshTask() {
-  try { applyTask(await api("/api/task")); } catch {}
-}
-
-/* ---------- 初始化 ---------- */
-(async function init() {
-  buildParams(await api("/api/defaults"));
-  await refreshTask();          // 回看历史任务
-  pollHealth();
-  const es = new EventSource("/api/task/events");
-  es.onmessage = onEvent;
-  es.onerror = () => addLog("[warn] SSE 断线，3s 后自动重连");
-})();
+/* 保持旧调试入口可用 */
+window.studio = studio;

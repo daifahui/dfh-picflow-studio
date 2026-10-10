@@ -8,7 +8,8 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent          # prompt-studio/
 WEB_DIR = BASE_DIR / "web"
-OUTPUT_ROOT = BASE_DIR / "outputs"
+OUTPUT_ROOT = BASE_DIR / "outputs"                          # 默认工作区
+WORKSPACE_POINTER = BASE_DIR / "workspace.json"             # 上次工作区路径指针（gitignore）
 UPLOAD_DIR = BASE_DIR / "uploads"                           # 上传的压缩包暂存
 LOG_DIR = BASE_DIR / "logs"
 

@@ -137,3 +137,30 @@ def test_caption_image_appends_note():
     body = route.calls.last.request.read().decode()
     assert "头发改成银白色" in body
     img.unlink()
+
+
+# ---------- AI 任务命名（§16.4） ----------
+@respx.mock
+def test_generate_task_name_strips_think_and_cleans():
+    route = respx.post(f"{BASE}/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=_chat(
+            "<think>想想……</think>\n「夜晚窗边的蓝发少女。」")))
+    name = llm_caption.generate_task_name({"rewritten_prompt": "x" * 800})
+    assert name == "夜晚窗边的蓝发少女"                 # think 剥离 + 引号剥离
+    body = route.calls.last.request.read().decode()
+    assert "命名助手" in body
+    assert "xxxx" in body                              # 提示词已注入（截断到 600）
+
+
+@respx.mock
+def test_generate_task_name_sanitizes_illegal_chars():
+    respx.post(f"{BASE}/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=_chat('a/b:c')))
+    assert llm_caption.generate_task_name({"rewritten_prompt": "x"}) == "a_b_c"
+
+
+@respx.mock
+def test_generate_task_name_failure_returns_empty():
+    respx.post(f"{BASE}/v1/chat/completions").mock(
+        return_value=httpx.Response(500, text="boom"))
+    assert llm_caption.generate_task_name({"rewritten_prompt": "x"}) == ""

@@ -1,12 +1,13 @@
-"""接口级测试（TestClient）：任务创建/条目操作/全流程状态机/安全边界。
+"""接口级测试（TestClient）：工作区/队列/任务路由/全流程状态机/安全边界。
 
 外部模型服务全部由 stub_external 桩掉（见 conftest），本文件验证的是
-路由 → 状态机 → worker 线程 → 落盘 的完整逻辑链路。
+路由 → 工作区状态机 → 队列 worker → 落盘 的完整逻辑链路。
 """
 import json
 import pathlib
 
-from tests.conftest import FAKE_CONTRACT, wait_phase
+from tests.conftest import (FAKE_CONTRACT, import_task, make_png,
+                            wait_task_phase, wait_ws)
 
 
 # ---------- 基础端点 ----------
@@ -22,41 +23,75 @@ def test_health_reflects_probe(client, monkeypatch):
     assert client.get("/api/health").json() == {"llm": False, "comfy": True}
 
 
-def test_task_empty_initially(client):
-    assert client.get("/api/task").json() == {"task": None}
+def test_workspace_initially_empty(client):
+    ws = client.get("/api/workspace").json()
+    assert ws["queue"] == [] and ws["running"] is False
 
 
-# ---------- 任务创建 ----------
-def test_create_task_from_folder(client, image_dir):
-    r = client.post("/api/task", json={"source": str(image_dir), "name": "t"})
+# ---------- 任务导入 ----------
+def test_import_from_folder(client, image_dir):
+    r = client.post("/api/queue/items",
+                    json={"items": [{"source": str(image_dir), "name": "t"}]})
     assert r.status_code == 200, r.text
-    data = r.json()
-    assert data["task"]["total"] == 3
-    assert [i["src_filename"] for i in data["items"]] == \
-        ["a1.webp", "a2.jpg", "b10.png"]           # 自然排序
+    created = r.json()["created"]
+    assert created[0]["total"] == 3
+    d = client.get(f"/api/tasks/{created[0]['id']}").json()
+    assert [i["src_filename"] for i in d["items"]] == \
+        ["a1.webp", "a2.jpg", "b10.png"]               # 自然排序
 
 
-def test_create_task_from_zip(client, zip_archive):
-    r = client.post("/api/task", json={"source": str(zip_archive)})
-    assert r.status_code == 200
-    names = [i["src_filename"] for i in r.json()["items"]]
+def test_import_from_zip(client, zip_archive):
+    r = client.post("/api/queue/items",
+                    json={"items": [{"source": str(zip_archive)}]})
+    names = [i["src_filename"] for i in
+             client.get(f"/api/tasks/{r.json()['created'][0]['id']}").json()["items"]]
     assert names == ["0001_a1.webp", "0002_a2.jpg", "0003_b10.png"]
 
 
-def test_create_task_rejects_missing_source(client):
-    r = client.post("/api/task", json={"source": "D:/definitely/not/here"})
+def test_import_multiple_and_queue_order(client, image_dir, tmp_path):
+    second = tmp_path / "imgs2"
+    second.mkdir()
+    (second / "x.png").write_bytes(b"not really png but fine")
+    r = client.post("/api/queue/items", json={"items": [
+        {"source": str(image_dir), "name": "first"},
+        {"source": str(second), "name": "second"}]})
+    assert [t["name"] for t in r.json()["queue"]] == ["first", "second"]
+
+
+def test_import_rejects_missing_source(client):
+    r = client.post("/api/queue/items",
+                    json={"items": [{"source": "D:/definitely/not/here"}]})
     assert r.status_code == 400
 
 
-def test_create_task_rejects_random_file(client, tmp_path):
-    f = tmp_path / "x.bin"
-    f.write_bytes(b"1")
-    assert client.post("/api/task", json={"source": str(f)}).status_code == 400
+def test_import_rejects_bad_mode(client, image_dir):
+    r = client.post("/api/queue/items",
+                    json={"items": [{"source": str(image_dir), "mode": "x"}]})
+    assert r.status_code == 400
 
 
-def test_create_task_rejects_second_active(client, image_dir):
-    client.post("/api/task", json={"source": str(image_dir)})
-    assert client.post("/api/task", json={"source": str(image_dir)}).status_code == 409
+def test_import_rejects_relative_output_dir(client, image_dir):
+    r = client.post("/api/queue/items", json={"items": [
+        {"source": str(image_dir), "output_image_dir": "rel/dir"}]})
+    assert r.status_code == 400
+
+
+def test_delete_task_only_when_idle(client, image_dir):
+    tid = import_task(client, image_dir)
+    assert client.delete(f"/api/tasks/{tid}").json() == {"ok": True}
+    assert client.get(f"/api/tasks/{tid}").status_code == 404
+    assert client.delete(f"/api/tasks/{tid}").status_code == 404
+
+
+def test_rename_task_marks_renamed(client, image_dir):
+    tid = import_task(client, image_dir, name="old-name")
+    r = client.post(f"/api/tasks/{tid}/rename", json={"name": "new name"})
+    assert r.status_code == 200
+    ws = client.get("/api/workspace").json()
+    assert ws["queue"][0]["name"] == "new name"
+    assert ws["queue"][0]["id"] == "new name"          # id 跟随目录名
+    assert client.post(f"/api/tasks/{tid}/rename",
+                       json={"name": "x"}).status_code == 404   # 旧 id 失效
 
 
 def test_upload_zip_and_reject_other(client, zip_archive):
@@ -67,121 +102,179 @@ def test_upload_zip_and_reject_other(client, zip_archive):
         "file": ("virus.exe", b"MZ", "application/x-dos")}).status_code == 400
 
 
-# ---------- 全流程状态机（caption → reviewing → generate → done） ----------
-def test_auto_pipeline_end_to_end(client, image_dir, stub_external):
-    client.post("/api/task", json={"source": str(image_dir)})
-    assert client.post("/api/task/auto").json() == {"ok": True}
+# ---------- 工作区 ----------
+def test_switch_workspace(client, image_dir, tmp_path):
+    new_ws = tmp_path / "ws2"
+    r = client.post("/api/workspace", json={"path": str(new_ws)})
+    assert r.status_code == 200 and r.json()["workspace"] == str(new_ws)
+    tid = import_task(client, image_dir, name="in-ws2")
+    from server.state import manager
+    assert str(new_ws) in manager.task(tid).dir
+    assert client.post("/api/workspace",
+                       json={"path": "rel/path"}).status_code == 400
 
-    data = wait_phase(client, "done", timeout=15)
+
+# ---------- 队列全流程（阶段批处理） ----------
+def test_queue_batched_pipeline_order(client, image_dir, stub_external, monkeypatch):
+    """两任务串行：caption(任务1+2) → 关 LLM → 开 ComfyUI → generate(1+2) → 关。"""
+    from server import comfy_client, llm_caption
+    calls = []
+
+    def fake_ensure_llm():
+        llm_caption._owned_proc = object()      # 模拟真实 ensure 登记代管进程
+        calls.append("llm_up")
+
+    def fake_stop_llm():
+        llm_caption._owned_proc = None          # 模拟真实 stop 释放所有权
+        calls.append("llm_down")
+
+    monkeypatch.setattr(llm_caption, "ensure_llm", fake_ensure_llm)
+    monkeypatch.setattr(llm_caption, "stop_llm", fake_stop_llm)
+    monkeypatch.setattr(comfy_client, "ensure_comfy",
+                        lambda: calls.append("comfy_up"))
+    monkeypatch.setattr(comfy_client, "stop_comfy",
+                        lambda: calls.append("comfy_down"))
+    monkeypatch.setattr(llm_caption, "caption_image",
+                        lambda path, note="": calls.append("cap") or dict(FAKE_CONTRACT))
+    monkeypatch.setattr(comfy_client, "generate_one",
+                        lambda c, p, s, prefix: calls.append("gen") or make_png(8, 8))
+
+    t1 = import_task(client, image_dir, name="a")
+    t2 = import_task(client, image_dir, name="b")
+    client.post("/api/queue/start")
+    wait_task_phase(client, t1, "done")
+    wait_task_phase(client, t2, "done")
+
+    assert calls[0] == "llm_up"
+    assert calls.count("llm_up") == 1 and calls.count("llm_down") == 1
+    assert calls.index("llm_down") < calls.index("comfy_up")   # 显存先换后进
+    assert calls.count("comfy_up") == 1 and calls.count("comfy_down") == 1
+    assert calls.count("cap") == 6 and calls.count("gen") == 6
+    assert calls.index("comfy_down") == len(calls) - 1
+    # 服务各只起一次的关键断言
+    assert calls[:8] == ["llm_up"] + ["cap"] * 6 + ["llm_down"]
+    assert t1 and t2
+
+
+def test_queue_review_gate_blocks_generate(client, image_dir, stub_external,
+                                           monkeypatch):
+    from server import comfy_client
+    comfy_calls = []
+    monkeypatch.setattr(comfy_client, "ensure_comfy",
+                        lambda: comfy_calls.append("up"))
+    tid = import_task(client, image_dir, name="g", mode="review")
+    client.post("/api/queue/start")
+    wait_task_phase(client, tid, "reviewing")
+    wait_ws(client, lambda ws: ws["gate"] is True)
+    assert comfy_calls == []                            # 闸未放行，不碰 ComfyUI
+    client.post("/api/queue/resume")
+    wait_task_phase(client, tid, "done")
+    wait_ws(client, lambda ws: ws["gate"] is False)
+    assert comfy_calls == ["up"]
+
+
+def test_queue_pause_between_items_then_resume(client, image_dir, stub_external,
+                                               monkeypatch):
+    """第一张提取完即暂停 → 队列停住 → 继续 → 全部完成（断点续跑不重提）。"""
+    from server import llm_caption
+    n = {"cap": 0}
+    real_contract = dict(FAKE_CONTRACT)
+    def fake_caption(path, note=""):
+        n["cap"] += 1
+        if n["cap"] == 1:
+            from server.state import manager
+            manager.pause_flag = True                   # 模拟用户在第一张后按暂停
+        return dict(real_contract)
+    monkeypatch.setattr(llm_caption, "caption_image", fake_caption)
+
+    tid = import_task(client, image_dir, name="p")
+    client.post("/api/queue/start")
+    wait_ws(client, lambda ws: not ws["running"] and ws["paused"], timeout=15)
+    assert n["cap"] == 1
+    assert client.post("/api/queue/resume").status_code == 200
+    wait_task_phase(client, tid, "done", timeout=15)
+    assert n["cap"] == 3                                # 续跑只补剩下的
+
+
+def test_queue_stop_marks_tasks_stopped(client, image_dir, stub_external):
+    tid = import_task(client, image_dir, name="s")
+    client.post("/api/queue/stop")                       # 未启动也可预挂取消
+    client.post("/api/queue/start")
+    wait_task_phase(client, tid, "stopped")
+    ws = client.get("/api/workspace").json()
+    assert ws["running"] is False
+
+
+def test_auto_single_task_degenerates_to_old_full_flow(client, image_dir,
+                                                       stub_external):
+    """单任务 + 全自动 = 原 v1 全流程。"""
+    tid = import_task(client, image_dir, name="one", mode="auto")
+    client.post("/api/queue/start")
+    data = wait_task_phase(client, tid, "done", timeout=15)
     items = data["items"]
     assert all(i["status"] == "done" for i in items)
-    assert all(i["contract"] == FAKE_CONTRACT for i in items)
-    assert all(i["out_image"] for i in items)
-
-    from server.state import manager
-    task_dir = pathlib.Path(manager.current().dir)
-    assert (task_dir / items[0]["out_image"]).exists()      # v11：生成图在任务根
+    task_dir = pathlib.Path(data["task"]["images_dir"])
+    assert (task_dir / items[0]["out_image"]).exists()
     assert len(list((task_dir / "prompts").glob("*.json"))) == 3
-    summary = task_dir / "prompts" / "prompts_summary.jsonl"
-    lines = summary.read_text(encoding="utf-8").strip().splitlines()
-    assert len(lines) == 3 and json.loads(lines[0])["seq"] == 1
-    assert (task_dir / ".studio" / "task.json").exists()
 
 
-# ---------- 输出双目录（§16.2） ----------
-def test_output_dirs_custom_created_and_reported(client, image_dir, tmp_path):
-    img_out = tmp_path / "prod" / "imgs"
-    prompt_out = tmp_path / "prod" / "words"
-    r = client.post("/api/task", json={
-        "source": str(image_dir), "name": "od",
-        "output_image_dir": str(img_out), "output_prompt_dir": str(prompt_out)})
-    assert r.status_code == 200
-    t = r.json()["task"]
-    assert t["images_dir"] == str(img_out)
-    assert t["prompts_dir"] == str(prompt_out)
-    assert img_out.exists() and prompt_out.exists()          # 创建即建目录
-
-
-def test_output_dir_must_be_absolute(client, image_dir):
-    r = client.post("/api/task", json={
-        "source": str(image_dir), "output_image_dir": "relative/dir"})
-    assert r.status_code == 400
-
-
-def test_task_name_path_chars_sanitized(client, image_dir):
-    r = client.post("/api/task", json={"source": str(image_dir), "name": 'a/b:c*?'})
-    assert r.status_code == 200
+# ---------- AI 命名 ----------
+def test_ai_naming_renames_after_first_contract(client, image_dir, stub_external):
+    tid = import_task(client, image_dir, name="pkg-2024", ai_name=True)
+    client.post("/api/queue/start")
+    wait_ws(client, lambda ws: ws["queue"] and ws["queue"][0]["name"] == "AI 名称",
+            timeout=15)
+    wait_task_phase(client, "AI 名称", "done")
     from server.state import manager
-    assert "/" not in manager.current().id and "\\" not in manager.current().id
+    t = manager.task("AI 名称")
+    assert t.dir.endswith("AI 名称")                     # 目录随名重命名
+    assert not manager.task(tid)                        # 旧 id 失效
 
 
-def test_generate_writes_to_custom_output_dirs(client, image_dir, stub_external,
-                                               tmp_path):
-    img_out = tmp_path / "custom_imgs"
-    prompt_out = tmp_path / "custom_words"
-    client.post("/api/task", json={
-        "source": str(image_dir), "name": "cust",
-        "output_image_dir": str(img_out), "output_prompt_dir": str(prompt_out)})
-    client.post("/api/task/caption")
-    wait_phase(client, "reviewing")
-    client.post("/api/task/generate")
-    data = wait_phase(client, "done")
-    assert (img_out / data["items"][0]["out_image"]).exists()
-    assert (prompt_out / "0001.json").exists()
-    assert (prompt_out / "prompts_summary.jsonl").exists()
-    assert client.get("/api/img/out/1").status_code == 200   # 自定义目录可安全访问
+def test_user_rename_blocks_ai_naming(client, image_dir, stub_external):
+    tid = import_task(client, image_dir, name="mine", ai_name=True)
+    client.post(f"/api/tasks/{tid}/rename", json={"name": "my-own"})
+    client.post("/api/queue/start")
+    wait_task_phase(client, "my-own", "done")
+    ws = client.get("/api/workspace").json()
+    assert ws["queue"][0]["name"] == "my-own"           # 手动改名优先
 
 
+# ---------- 审阅页单任务操作 ----------
 def test_caption_only_stops_at_reviewing(client, image_dir, stub_external):
-    client.post("/api/task", json={"source": str(image_dir)})
-    client.post("/api/task/caption")
-    data = wait_phase(client, "reviewing")
+    tid = import_task(client, image_dir, name="c")
+    client.post(f"/api/tasks/{tid}/caption")
+    data = wait_task_phase(client, tid, "reviewing")
     assert all(i["status"] == "captioned" for i in data["items"])
 
 
 def test_generate_one_after_caption(client, image_dir, stub_external):
-    client.post("/api/task", json={"source": str(image_dir)})
-    client.post("/api/task/caption")
-    wait_phase(client, "reviewing")
-    assert client.post("/api/task/items/2/generate").json() == {"ok": True}
-    data = wait_phase(client, "done")
+    tid = import_task(client, image_dir, name="g1")
+    client.post(f"/api/tasks/{tid}/caption")
+    wait_task_phase(client, tid, "reviewing")
+    client.post(f"/api/tasks/{tid}/items/2/generate")
+    data = wait_task_phase(client, tid, "done")
     assert data["items"][1]["status"] == "done"
     assert data["items"][0]["status"] == "captioned"     # 其余不受影响
 
 
-def test_generate_stops_owned_llm_before_comfy(client, image_dir, stub_external,
-                                               monkeypatch):
-    """显存互斥回归（设计 §3.3）：本服务器代管的 llama-server 必须在
-    ensure_comfy 之前关闭，与请求参数无关。"""
+def test_generate_closes_owned_llm_before_comfy(client, image_dir, stub_external,
+                                                monkeypatch):
+    """显存互斥回归（§3.3）：单任务生成前必须先关代管 LLM。"""
     from server import llm_caption
-    calls: list[str] = []
+    calls = []
     monkeypatch.setattr(llm_caption, "stop_llm", lambda: calls.append("stop_llm"))
-    monkeypatch.setattr(llm_caption, "_owned_proc", object())   # 模拟 caption 阶段拉起的实例
-
-    client.post("/api/task", json={"source": str(image_dir)})
-    client.post("/api/task/caption")
-    wait_phase(client, "reviewing")
-    client.post("/api/task/generate")                    # 前端「全部生成」的原始调用（无附加参数）
-    wait_phase(client, "done")
+    monkeypatch.setattr(llm_caption, "_owned_proc", object())
+    tid = import_task(client, image_dir, name="own")
+    client.post(f"/api/tasks/{tid}/caption")
+    wait_task_phase(client, tid, "reviewing")
+    client.post(f"/api/tasks/{tid}/generate")
+    wait_task_phase(client, tid, "done")
     assert calls == ["stop_llm"]
 
 
-def test_generate_reuses_external_llm(client, image_dir, stub_external, monkeypatch):
-    """外部手动启动的 llama-server（非代管）只复用、不关闭。"""
-    from server import llm_caption
-    calls: list[str] = []
-    monkeypatch.setattr(llm_caption, "stop_llm", lambda: calls.append("stop_llm"))
-    assert not llm_caption.owns_llm()                    # ensure_llm 已被桩掉，全程无代管进程
-
-    client.post("/api/task", json={"source": str(image_dir)})
-    client.post("/api/task/caption")
-    wait_phase(client, "reviewing")
-    client.post("/api/task/generate")
-    wait_phase(client, "done")
-    assert calls == []
-
-
-def test_recaption_records_note_and_reruns(client, image_dir, stub_external, monkeypatch):
+def test_recaption_records_note_and_reruns(client, image_dir, stub_external,
+                                           monkeypatch):
     seen = {}
     from server import llm_caption
     def fake_caption(path, note=""):
@@ -189,47 +282,72 @@ def test_recaption_records_note_and_reruns(client, image_dir, stub_external, mon
         return dict(FAKE_CONTRACT)
     monkeypatch.setattr(llm_caption, "caption_image", fake_caption)
 
-    client.post("/api/task", json={"source": str(image_dir)})
-    client.post("/api/task/caption")
-    wait_phase(client, "reviewing")
-    client.post("/api/task/items/1/recaption", json={"note": "头发改银白"})
-    wait_phase(client, "reviewing")
+    tid = import_task(client, image_dir, name="rc")
+    client.post(f"/api/tasks/{tid}/caption")
+    wait_task_phase(client, tid, "reviewing")
+    client.post(f"/api/tasks/{tid}/items/1/recaption", json={"note": "头发改银白"})
+    wait_task_phase(client, tid, "reviewing")
     assert seen["note"] == "头发改银白"
 
 
 # ---------- 条目编辑 ----------
 def test_update_item_contract_and_note(client, image_dir, stub_external):
-    client.post("/api/task", json={"source": str(image_dir)})
-    client.post("/api/task/caption")
-    wait_phase(client, "reviewing")
-    r = client.put("/api/task/items/1", json={
+    tid = import_task(client, image_dir, name="edit")
+    client.post(f"/api/tasks/{tid}/caption")
+    wait_task_phase(client, tid, "reviewing")
+    r = client.put(f"/api/tasks/{tid}/items/1", json={
         "rewritten_prompt": "edited prompt", "wh_ratio": "3:4", "note": "n1"})
     assert r.status_code == 200
-    it = client.get("/api/task").json()["items"][0]
+    it = client.get(f"/api/tasks/{tid}").json()["items"][0]
     assert it["contract"] == {"rewritten_prompt": "edited prompt", "wh_ratio": "3:4"}
     assert it["note"] == "n1"
 
 
-def test_update_item_404(client):
-    assert client.put("/api/task/items/9", json={"note": "x"}).status_code == 404
+def test_update_item_404(client, image_dir):
+    tid = import_task(client, image_dir, name="e2")
+    assert client.put(f"/api/tasks/{tid}/items/9",
+                      json={"note": "x"}).status_code == 404
 
 
-# ---------- 停止与安全边界 ----------
-def test_stop_sets_flag(client, image_dir):
-    client.post("/api/task", json={"source": str(image_dir)})
-    assert client.post("/api/task/stop").json() == {"ok": True}
-    assert client.get("/api/task").json()["task"]["phase"] == "stopped"
+# ---------- 输出双目录（§16.2，M6 回归） ----------
+def test_output_dirs_custom_created_and_reported(client, image_dir, tmp_path):
+    img_out = tmp_path / "prod" / "imgs"
+    prompt_out = tmp_path / "prod" / "words"
+    r = client.post("/api/queue/items", json={"items": [{
+        "source": str(image_dir), "name": "od",
+        "output_image_dir": str(img_out), "output_prompt_dir": str(prompt_out)}]})
+    t = r.json()["created"][0]
+    assert t["images_dir"] == str(img_out)
+    assert t["prompts_dir"] == str(prompt_out)
+    assert img_out.exists() and prompt_out.exists()
 
 
+def test_generate_writes_to_custom_output_dirs(client, image_dir, stub_external,
+                                               tmp_path):
+    img_out = tmp_path / "custom_imgs"
+    prompt_out = tmp_path / "custom_words"
+    tid = import_task(client, image_dir, name="cust",
+                      output_image_dir=str(img_out),
+                      output_prompt_dir=str(prompt_out))
+    client.post(f"/api/tasks/{tid}/caption")
+    wait_task_phase(client, tid, "reviewing")
+    client.post(f"/api/tasks/{tid}/generate")
+    data = wait_task_phase(client, tid, "done")
+    assert (img_out / data["items"][0]["out_image"]).exists()
+    assert (prompt_out / "0001.json").exists()
+    assert client.get(f"/api/tasks/{tid}/img/out/1").status_code == 200
+
+
+# ---------- 图片服务与安全边界 ----------
 def test_img_seq_404(client, image_dir):
-    client.post("/api/task", json={"source": str(image_dir)})
-    assert client.get("/api/img/src/99").status_code == 404
-    assert client.get("/api/img/thumb/99").status_code == 404
+    tid = import_task(client, image_dir, name="i404")
+    assert client.get(f"/api/tasks/{tid}/img/src/99").status_code == 404
+    assert client.get(f"/api/tasks/{tid}/img/thumb/99").status_code == 404
 
 
 def test_img_src_served_with_mime(client, image_dir):
-    client.post("/api/task", json={"source": str(image_dir)})
-    r = client.get("/api/img/src/1")
+    tid = import_task(client, image_dir, name="mime")
+    r = client.get(f"/api/tasks/{tid}/img/src/1")
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("image/")
 

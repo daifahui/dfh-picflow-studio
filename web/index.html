@@ -5,73 +5,156 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Prompt Studio</title>
 <link rel="stylesheet" href="/static/style.css">
+<script defer src="/static/alpine.min.js"></script>
+<script src="/static/app.js"></script>
 </head>
-<body>
+<body x-data="studio()" x-init="init()" @ps-sse.window="onSse($event.detail)">
+
 <header>
   <h1>Prompt Studio</h1>
   <span class="sub">本地批量提示词提取 + Qwen-Image-2.1 文生图</span>
-  <span id="health" class="health">…</span>
+  <span id="health" class="health">
+    LLM <b :class="health.llm ? 'on' : 'off'" x-text="health.llm ? '运行中' : '未启动'"></b>　
+    ComfyUI <b :class="health.comfy ? 'on' : 'off'" x-text="health.comfy ? '运行中' : '未启动'"></b>
+  </span>
 </header>
 
 <nav id="tabs">
-  <button data-view="task" class="on">① 任务</button>
-  <button data-view="review">② 审阅 / 进度</button>
-  <button data-view="result">③ 结果</button>
+  <button :class="{on: view==='queue'}" @click="show('queue')">① 队列</button>
+  <button :class="{on: view==='review'}" @click="show('review')">② 审阅 / 进度</button>
+  <button :class="{on: view==='result'}" @click="show('result')">③ 结果</button>
 </nav>
 
-<!-- ============ 视图1：任务 ============ -->
-<main id="view-task">
+<!-- ============ 视图1：队列 / 工作区 ============ -->
+<main id="view-queue" x-show="view==='queue'">
   <section class="card">
-    <h2>输入源</h2>
+    <h2>工作区 <small>（本次批量作业的输出根目录）</small></h2>
     <div class="row">
-      <input id="src-path" type="text" placeholder="文件夹路径或压缩包路径（zip / 7z）">
-      <button id="btn-browse">选择文件夹…</button>
+      <input id="ws-path" x-model="wsInput" placeholder="工作区目录（默认 prompt-studio/outputs）">
+      <button id="btn-ws-browse" @click="browseWorkspace()">选择…</button>
+      <button id="btn-ws-apply" @click="applyWorkspace()">应用</button>
     </div>
-    <div class="row">
-      <input id="src-file" type="file" accept=".zip,.7z">
-    </div>
-    <div class="row">
-      <input id="task-name" type="text" placeholder="任务名（可选，默认时间戳）">
-    </div>
-    <div class="row">
-      <input id="out-img-dir" type="text" placeholder="图片输出目录（可选，默认 outputs/&lt;任务名&gt;）">
-    </div>
-    <div class="row">
-      <input id="out-prompt-dir" type="text" placeholder="提示词输出目录（可选，默认 图片输出目录/prompts）">
-    </div>
+    <p class="hint">当前：<span x-text="ws.workspace"></span></p>
   </section>
 
   <section class="card">
-    <h2>生图参数 <small>（默认与 akane 实跑一致，可改）</small></h2>
-    <div class="grid" id="params"></div>
+    <h2>导入任务 <small>（可连续导入多个压缩包/文件夹）</small></h2>
+    <div class="row">
+      <input id="import-path" x-model="imp.path" placeholder="文件夹路径或压缩包路径（zip / 7z）">
+      <button id="btn-browse" @click="browseImport()">选择文件夹…</button>
+    </div>
+    <div class="row">
+      <input id="import-file" type="file" accept=".zip,.7z">
+    </div>
+    <div class="row">
+      <input id="import-name" x-model="imp.name" placeholder="任务名（可留空：先占位，首图提取后 AI 自动命名）">
+    </div>
+    <div class="row">
+      <label class="inline">模式
+        <select id="import-mode" x-model="imp.mode">
+          <option value="auto">全自动</option>
+          <option value="review">停在审阅</option>
+        </select>
+      </label>
+      <label class="inline check"><input type="checkbox" x-model="imp.aiName"> AI 命名</label>
+    </div>
+    <details class="adv">
+      <summary>输出目录与生图参数（可选）</summary>
+      <div class="row">
+        <input id="imp-img-dir" x-model="imp.imgDir" placeholder="图片输出目录（默认 工作区/&lt;任务名&gt;）">
+      </div>
+      <div class="row">
+        <input id="imp-prompt-dir" x-model="imp.promptDir" placeholder="提示词输出目录（默认 图片输出目录/prompts）">
+      </div>
+      <div class="grid" id="params">
+        <template x-for="f in paramFields" :key="f[0]">
+          <label>
+            <span x-text="f[1]"></span>
+            <template x-if="f[2]==='checkbox'">
+              <input type="checkbox" x-model="imp.params[f[0]]">
+            </template>
+            <template x-if="f[2]!=='checkbox'">
+              <input :type="f[2]" x-model="imp.params[f[0]]">
+            </template>
+          </label>
+        </template>
+      </div>
+    </details>
+    <div class="row actions">
+      <button id="btn-import" class="primary" @click="importTask(false)">加入队列</button>
+      <button id="btn-import-start" class="primary accent" @click="importTask(true)">加入并开始</button>
+    </div>
+    <p class="hint">两阶段串行（16G 显存互斥）：先全部提取提示词（LLM 只起一次），再全部生成（ComfyUI 只起一次）。
+       点击「开始/继续」即代表批准启动 llama-server / ComfyUI，服务自动启停。</p>
   </section>
 
-  <section class="card actions">
-    <button id="btn-caption" class="primary">提取提示词</button>
-    <button id="btn-auto" class="primary accent">全自动（提取 + 生成）</button>
-    <p class="hint">「提取提示词」完成后停在审阅页；「全自动」一路跑到底。
-       点击即代表批准启动 llama-server / ComfyUI（16G 显存两阶段串行，服务自动启停）。</p>
+  <section class="card">
+    <div class="row spread">
+      <h2>队列 <span class="hint" x-text="queueLabel()"></span></h2>
+      <div>
+        <button id="btn-queue-start" class="primary"
+                x-text="ws.running || ws.gate ? '继续' : '开始队列'"
+                @click="queueStart()"></button>
+        <button id="btn-queue-pause" @click="queuePause()">暂停</button>
+        <button id="btn-queue-stop" class="danger" @click="queueStop()">停止队列</button>
+      </div>
+    </div>
+    <p class="hint" id="queue-empty" x-show="ws.queue.length === 0">队列为空——先在上面导入任务。</p>
+    <table class="queue-table" id="queue-table" x-show="ws.queue.length > 0">
+      <thead>
+        <tr><th>任务名</th><th>来源</th><th>模式</th><th>状态</th><th>进度</th><th>当前</th><th></th></tr>
+      </thead>
+      <tbody>
+        <template x-for="t in ws.queue" :key="t.id">
+          <tr @click="openTask(t.id)" :class="'q-' + t.phase">
+            <td><input class="name-edit" :value="t.name" @click.stop
+                       @change="renameTask(t.id, $event.target.value)"
+                       @keydown.enter="$event.target.blur()" :title="t.id"></td>
+            <td class="dim cell-src" x-text="shortPath(t.source)"></td>
+            <td x-text="t.mode === 'review' ? '审阅' : '自动'"></td>
+            <td><span class="badge" :class="'st-' + t.phase"
+                      x-text="phaseLabel(t.phase)"></span></td>
+            <td class="cell-prog">
+              <div class="progress slim">
+                <div class="bar" :style="`width:${pct(t)}%`"></div>
+              </div>
+              <span class="hint" x-text="countsLabel(t)"></span>
+            </td>
+            <td class="dim cell-current"
+                x-text="progress[t.id] ? `${progress[t.id].done}/${progress[t.id].total} ${progress[t.id].filename}` : ''"></td>
+            <td><button class="ghost" x-show="t.phase === 'idle'" @click.stop="removeTask(t.id)">移除</button></td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+    <div class="gate-hint" x-show="ws.gate">⏸ 审阅闸：审阅完成后点「继续」开始生成。</div>
+    <div class="live-prompt" x-show="typed" x-text="typed"></div>
   </section>
 </main>
 
 <!-- ============ 视图2：审阅 / 进度 ============ -->
-<main id="view-review" class="hidden">
-  <section class="card" id="progress-card">
+<main id="view-review" x-show="view==='review'">
+  <section class="card">
     <div class="row spread">
-      <h2 id="phase-label">空闲</h2>
+      <h2 id="phase-label">
+        <span x-text="taskName()"></span> — <span x-text="phaseLabel(taskPhase())"></span>
+      </h2>
       <div>
-        <button id="btn-stop" class="danger">停止</button>
-        <button id="btn-generate-all" class="primary">全部生成 →</button>
+        <button @click="show('queue')">← 队列</button>
+        <button id="btn-resume" class="primary" x-show="ws.gate" @click="queueResume()">继续生成 →</button>
+        <button id="btn-generate-all" class="primary" @click="generateAll()">全部生成 →</button>
+        <button id="btn-stop-task" class="danger" @click="stopTask()">停止</button>
       </div>
     </div>
-    <div class="progress"><div id="progress-bar"></div></div>
-    <div id="progress-text" class="hint">等待任务</div>
+    <div class="progress"><div id="progress-bar" class="bar" :style="`width:${taskPct()}%`"></div></div>
+    <div id="progress-text" class="hint" x-text="progressText()"></div>
   </section>
 
   <section class="card">
     <div class="row spread">
-      <h2>图片 <span id="item-count"></span></h2>
-      <select id="view-mode" class="view-mode" title="视图切换">
+      <h2>图片 <span class="hint" x-text="`（${curItems().length} 张）`"></span></h2>
+      <select id="view-mode" class="view-mode" title="视图切换" :value="viewMode"
+              @change="setViewMode($event.target.value)">
         <option value="lg">大图标</option>
         <option value="md">中图标</option>
         <option value="sm">小图标</option>
@@ -79,16 +162,35 @@
         <option value="details">详细信息</option>
       </select>
     </div>
-    <div id="grid" class="grid-imgs view-lg"></div>
+    <p class="hint" x-show="curItems().length === 0">该任务暂无条目</p>
+    <div id="grid" class="grid-imgs" :class="viewModeClass()">
+      <template x-for="it in curItems()" :key="it.seq">
+        <div class="cell" :class="cellClass(it)" @click="openDetail(it.seq)">
+          <img :src="`/api/tasks/${sel}/img/thumb/${it.seq}`" loading="lazy" alt=""
+               @load="$event.target.classList.add('ld')">
+          <span class="tag" x-text="statusLabel(it.status)"></span>
+          <span class="meta" x-text="metaText(it)"></span>
+          <span class="name" x-text="`${it.seq}_${it.src_filename}`"></span>
+        </div>
+      </template>
+    </div>
   </section>
 </main>
 
 <!-- ============ 视图3：结果 ============ -->
-<main id="view-result" class="hidden">
+<main id="view-result" x-show="view==='result'">
   <section class="card">
     <div class="row spread">
-      <h2>原图 ↔ 生成图</h2>
-      <select id="view-mode-result" class="view-mode" title="视图切换">
+      <h2>原图 ↔ 生成图
+        <select class="view-mode" x-model="resultFilter" @change="ensureResultItems()">
+          <option value="all">全部任务</option>
+          <template x-for="t in ws.queue" :key="t.id">
+            <option :value="t.id" x-text="t.name"></option>
+          </template>
+        </select>
+      </h2>
+      <select id="view-mode-result" class="view-mode" title="视图切换" :value="viewMode"
+              @change="setViewMode($event.target.value)">
         <option value="lg">大图标</option>
         <option value="md">中图标</option>
         <option value="sm">小图标</option>
@@ -96,37 +198,57 @@
         <option value="details">详细信息</option>
       </select>
     </div>
-    <div id="result-grid" class="grid-imgs view-lg"></div>
+    <p class="hint" x-show="doneItems().length === 0">尚无完成项</p>
+    <div id="result-grid" class="grid-imgs" :class="viewModeClass()">
+      <template x-for="row in doneItems()" :key="row.tid + row.it.seq">
+        <div class="cell done" @click="openDetail(row.it.seq, row.tid)">
+          <img :src="`/api/tasks/${row.tid}/img/thumb/${row.it.seq}`" loading="lazy" alt=""
+               @load="$event.target.classList.add('ld')">
+          <span class="tag" x-text="statusLabel(row.it.status)"></span>
+          <span class="meta" x-text="metaText(row.it)"></span>
+          <span class="name" x-text="`${taskShort(row.tid)} · ${row.it.seq}`"></span>
+        </div>
+      </template>
+    </div>
   </section>
 </main>
 
-<!-- ============ 单张详情侧栏（初始滑出屏幕外，open 类滑入） ============ -->
-<aside id="detail">
-  <button id="detail-close" class="ghost">×</button>
+<!-- ============ 单张详情侧栏 ============ -->
+<aside id="detail" :class="{open: detailOpen}">
+  <button id="detail-close" class="ghost" @click="detailOpen = false">×</button>
   <div class="detail-imgs">
-    <figure><figcaption>原图</figcaption><img id="detail-src"></figure>
-    <figure id="detail-out-wrap"><figcaption>生成图</figcaption><img id="detail-out"></figure>
+    <figure>
+      <figcaption>原图（点击放大）</figcaption>
+      <img id="detail-src" :src="detailOpen ? `/api/tasks/${sel}/img/src/${detail.seq}` : ''"
+           @click="lightboxUrl = $event.target.src">
+    </figure>
+    <figure x-show="detail.out_image">
+      <figcaption>生成图（点击放大）</figcaption>
+      <img id="detail-out" :src="detail.out_image ? `/api/tasks/${sel}/img/out/${detail.seq}` : ''"
+           @click="lightboxUrl = $event.target.src">
+    </figure>
   </div>
   <label>rewritten_prompt
-    <textarea id="detail-prompt" rows="10"></textarea>
+    <textarea id="detail-prompt" rows="10" x-model="detail.prompt"></textarea>
   </label>
-  <label>wh_ratio <input id="detail-ratio" type="text"></label>
+  <label>wh_ratio <input id="detail-ratio" x-model="detail.ratio"></label>
   <label>注释（重新提取时附加给模型）
-    <textarea id="detail-note" rows="3" placeholder="例：头发改成银白色，不要手表"></textarea>
+    <textarea id="detail-note" rows="3" x-model="detail.note"
+              placeholder="例：头发改成银白色，不要手表"></textarea>
   </label>
   <div class="row">
-    <button id="btn-save" class="ghost">保存修改</button>
-    <button id="btn-recaption" class="primary">带注释重新提取</button>
-    <button id="btn-gen-one" class="primary accent">生图此张</button>
+    <button id="btn-save" class="ghost" @click="saveDetail()">保存修改</button>
+    <button id="btn-recaption" class="primary" @click="recaptionDetail()">带注释重新提取</button>
+    <button id="btn-gen-one" class="primary accent" @click="genOne()">生图此张</button>
   </div>
-  <div id="detail-status" class="hint"></div>
+  <div id="detail-status" class="hint" x-text="detailStatus()"></div>
 </aside>
+
+<div id="lightbox" :class="{open: !!lightboxUrl}" @click="lightboxUrl = ''">
+  <img :src="lightboxUrl" alt="">
+</div>
 
 <div id="logs"></div>
 
-<!-- lightbox：点击侧栏大图全屏预览 -->
-<div id="lightbox"><img id="lightbox-img" alt=""></div>
-
-<script src="/static/app.js"></script>
 </body>
 </html>

@@ -8,6 +8,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+import time
 import zipfile
 from pathlib import Path
 
@@ -32,12 +33,18 @@ def make_png(w: int = 64, h: int = 64) -> bytes:
 
 @pytest.fixture()
 def reset_manager():
-    """每个测试独享空任务态。"""
-    with manager.lock:
-        manager._task = None
+    """每个测试独享空工作区态。"""
+    def _clear():
+        with manager.lock:
+            manager._tasks.clear()
+            manager._queue.clear()
+            manager.running = False
+            manager.gate = False
+            manager.pause_flag = False
+            manager.resume_event.clear()
+    _clear()
     yield
-    with manager.lock:
-        manager._task = None
+    _clear()
 
 
 @pytest.fixture()
@@ -61,12 +68,13 @@ def zip_archive(tmp_path: Path, image_dir: Path) -> Path:
 
 @pytest.fixture()
 def stub_external(monkeypatch):
-    """桩掉两个模型服务的全部触点：ensure/no-op、caption 返回固定契约、
-    generate 返回真 PNG 字节、stop 为 no-op。"""
+    """桩掉两个模型服务与 AI 命名的全部触点。"""
     monkeypatch.setattr(llm_caption, "ensure_llm", lambda: None)
     monkeypatch.setattr(llm_caption, "stop_llm", lambda: None)
     monkeypatch.setattr(llm_caption, "caption_image",
                         lambda path, note="": dict(FAKE_CONTRACT))
+    monkeypatch.setattr(llm_caption, "generate_task_name",
+                        lambda contract: "AI 名称")
     monkeypatch.setattr(comfy_client, "ensure_comfy", lambda: None)
     monkeypatch.setattr(comfy_client, "stop_comfy", lambda: None)
     monkeypatch.setattr(comfy_client, "generate_one",
@@ -76,21 +84,49 @@ def stub_external(monkeypatch):
 
 @pytest.fixture()
 def client(reset_manager, tmp_path, monkeypatch):
-    """TestClient；输出目录隔离到 tmp，startup 的 load_latest 不受仓库真实
+    """TestClient；工作区与输出目录隔离到 tmp，startup 的 load 不受仓库真实
     outputs/ 残留影响。"""
     from server import config
-    monkeypatch.setattr(config, "OUTPUT_ROOT", tmp_path / "outputs")
+    ws_root = tmp_path / "outputs"
+    ws_root.mkdir()
+    monkeypatch.setattr(config, "OUTPUT_ROOT", ws_root)
+    monkeypatch.setattr(config, "WORKSPACE_POINTER", tmp_path / "ws-pointer.json")
+    with manager.lock:
+        manager.workspace = ws_root
     with TestClient(main.app) as c:
         yield c
 
 
-def wait_phase(client: TestClient, phase: str, timeout: float = 10.0) -> dict:
-    """轮询任务直至进入指定 phase（worker 在后台线程跑）。"""
-    import time
+# ---------- 队列测试辅助 ----------
+def import_task(client: TestClient, source: Path, name: str = "t",
+                mode: str = "auto", **kw) -> str:
+    """导入一个任务，返回 task_id（默认关 AI 命名保证 id 稳定）。"""
+    spec = {"source": str(source), "name": name, "mode": mode,
+            "ai_name": kw.pop("ai_name", False), **kw}
+    r = client.post("/api/queue/items", json={"items": [spec]})
+    assert r.status_code == 200, r.text
+    return r.json()["created"][0]["id"]
+
+
+def wait_task_phase(client: TestClient, tid: str, phase: str,
+                    timeout: float = 10.0) -> dict:
     deadline = time.time() + timeout
+    d = {}
     while time.time() < deadline:
-        data = client.get("/api/task").json()
-        if data["task"] and data["task"]["phase"] == phase:
-            return data
-        time.sleep(0.1)
-    raise AssertionError(f"等待 phase={phase} 超时，实际：{json.dumps(data['task'], ensure_ascii=False)}")
+        d = client.get(f"/api/tasks/{tid}").json()
+        if d["task"]["phase"] == phase:
+            return d
+        time.sleep(0.05)
+    raise AssertionError(
+        f"等待 task={tid} phase={phase} 超时，实际：{d.get('task')}")
+
+
+def wait_ws(client: TestClient, pred, timeout: float = 10.0) -> dict:
+    deadline = time.time() + timeout
+    ws = {}
+    while time.time() < deadline:
+        ws = client.get("/api/workspace").json()
+        if pred(ws):
+            return ws
+        time.sleep(0.05)
+    raise AssertionError(f"等待工作区状态超时：{json.dumps(ws, ensure_ascii=False)}")

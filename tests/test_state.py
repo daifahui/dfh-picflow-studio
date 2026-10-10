@@ -1,4 +1,4 @@
-"""state 单元测试：TaskManager 增删查、持久化、断点回看。"""
+"""state 单元测试：WorkspaceManager 注册/重命名/持久化/启动加载。"""
 import json
 from pathlib import Path
 
@@ -8,51 +8,125 @@ from server import config
 from server.state import Item, Task, manager
 
 
-def _mk_task(tmp_path: Path) -> Task:
-    items = [Item(seq=1, src_filename="0001_a.png", src_path=str(tmp_path / "a.png")),
-             Item(seq=2, src_filename="0002_b.png", src_path=str(tmp_path / "b.png"))]
-    return manager.create("t1", "src", tmp_path, dict(config.DEFAULT_PARAMS),
-                          items, tmp_path)
+@pytest.fixture()
+def ws(tmp_path: Path, monkeypatch) -> Path:
+    wsp = tmp_path / "ws"
+    wsp.mkdir()
+    monkeypatch.setattr(config, "OUTPUT_ROOT", wsp)
+    monkeypatch.setattr(config, "WORKSPACE_POINTER", tmp_path / "ptr.json")
+    with manager.lock:
+        manager._tasks.clear()
+        manager._queue.clear()
+        manager.workspace = wsp
+    yield wsp
+    with manager.lock:
+        manager._tasks.clear()
+        manager._queue.clear()
 
 
-def test_create_and_item_lookup(tmp_path: Path):
-    t = _mk_task(tmp_path)
-    assert manager.current() is t
-    assert manager.item(2).src_filename == "0002_b.png"
-    assert manager.item(99) is None
+def _mk_task(ws: Path, name: str = "t1") -> Task:
+    items = [Item(seq=1, src_filename="0001_a.png", src_path=str(ws / "a.png")),
+             Item(seq=2, src_filename="0002_b.png", src_path=str(ws / "b.png"))]
+    return manager.create_task(name, "src", ws, dict(config.DEFAULT_PARAMS),
+                               items, ws / name)
+
+
+def test_create_and_lookup(ws: Path):
+    t = _mk_task(ws)
+    assert manager.task("t1") is t
+    assert manager.item(t, 2).src_filename == "0002_b.png"
+    assert manager.item(t, 99) is None
+    assert manager.all_tasks() == [t]
     assert t.summary()["total"] == 2
+    assert t.counts()["pending"] == 2
 
 
-def test_set_status_persists_task_json(tmp_path: Path):
-    t = _mk_task(tmp_path)
-    manager.set_status(manager.item(1), "captioned")
-    d = json.loads((Path(t.dir) / ".studio" / "task.json").read_text(encoding="utf-8"))
+def test_set_status_persists_task_json(ws: Path):
+    t = _mk_task(ws)
+    manager.set_status(t, manager.item(t, 1), "captioned")
+    d = json.loads((ws / "t1" / ".studio" / "task.json").read_text(encoding="utf-8"))
     assert d["items"][0]["status"] == "captioned"
 
 
-def test_save_is_atomic_no_tmp_leftover(tmp_path: Path):
-    t = _mk_task(tmp_path)
-    manager.set_status(manager.item(1), "done")
-    leftovers = list((Path(t.dir) / ".studio").glob("*.tmp"))
-    assert leftovers == []
+def test_save_is_atomic_no_tmp_leftover(ws: Path):
+    t = _mk_task(ws)
+    manager.set_status(t, manager.item(t, 1), "done")
+    assert list((ws / "t1" / ".studio").glob("*.tmp")) == []
 
 
-def test_v11_default_paths(tmp_path: Path):
-    """新布局：图片在任务根、提示词在 prompts/、簿记在 .studio/；双输出目录可覆盖。"""
-    t = _mk_task(tmp_path)
+def test_workspace_json_roundtrip(ws: Path):
+    _mk_task(ws, "a")
+    _mk_task(ws, "b")
+    d = json.loads((ws / "workspace.json").read_text(encoding="utf-8"))
+    assert d["queue"] == ["a", "b"]
+    with manager.lock:
+        manager._tasks.clear()
+        manager._queue.clear()
+    assert manager.load() is True
+    assert [t.id for t in manager.all_tasks()] == ["a", "b"]
+
+
+def test_remove_task_only_idle(ws: Path):
+    t = _mk_task(ws, "gone")
+    assert manager.remove_task("gone") is True
+    assert manager.task("gone") is None
+    t2 = _mk_task(ws, "busy")
+    t2.phase = "generating"
+    assert manager.remove_task("busy") is False
+
+
+def test_rename_remaps_internal_paths_and_flags(ws: Path):
+    t = _mk_task(ws, "old")
+    t.source_root = str(ws / "old" / ".studio" / "source")
+    t.items[0].src_path = str(ws / "old" / ".studio" / "source" / "0001_a.png")
+    assert manager.rename_task(t, "new", by_user=True) is True
+    assert t.id == "new" and t.name == "new" and t.renamed is True
+    assert t.dir == str(ws / "new")
+    assert t.source_root == str(ws / "new" / ".studio" / "source")
+    assert t.items[0].src_path == \
+        str(ws / "new" / ".studio" / "source" / "0001_a.png")
+    assert manager.task("new") is t and manager.task("old") is None
+    assert (ws / "new" / ".studio" / "task.json").exists()
+
+
+def test_rename_sanitizes_and_rejects_same(ws: Path):
+    t = _mk_task(ws, "x")
+    assert manager.rename_task(t, 'a/b:c?', by_user=True) is True
+    assert t.name == "a_b_c_"
+    assert manager.rename_task(t, "a_b_c_", by_user=True) is False
+
+
+def test_load_scans_legacy_dirs_and_persists_index(ws: Path):
+    legacy = ws / "2026-old"
+    legacy.mkdir()
+    (legacy / "task.json").write_text(json.dumps({
+        "id": "2026-old", "name": "2026-old", "source_desc": "s",
+        "source_root": str(ws), "params": {}, "created_at": 0.0,
+        "phase": "done", "dir": str(legacy), "items": []}), encoding="utf-8")
+    assert manager.load() is True                    # v10 旧目录被补登记
+    assert manager.task("2026-old").layout == "v10"
+    assert (ws / "workspace.json").exists()          # 并落索引
+    assert manager.task("2026-old").cancel_flag is True
+
+
+def test_load_empty_workspace(ws: Path):
+    assert manager.load() is False
+
+
+# ---------- 路径解析（M6 回归） ----------
+def test_v11_default_paths(ws: Path):
+    t = _mk_task(ws)
     assert t.images_dir == Path(t.dir)
     assert t.prompts_dir == Path(t.dir) / "prompts"
     assert t.task_json_path == Path(t.dir) / ".studio" / "task.json"
     assert t.thumbs_dir == Path(t.dir) / ".studio" / "thumbs"
-
     t.output_image_dir = r"D:\out"
-    assert t.prompts_dir == Path(r"D:\out") / "prompts"     # 默认跟随图片输出目录
+    assert t.prompts_dir == Path(r"D:\out") / "prompts"
     t.output_prompt_dir = r"E:\words"
-    assert t.prompts_dir == Path(r"E:\words")               # 显式指定优先
+    assert t.prompts_dir == Path(r"E:\words")
 
 
 def test_from_dict_legacy_layout(tmp_path: Path):
-    """v1.0 旧 task.json（无 output_image_dir 字段）→ 自动识别 v10 只读布局。"""
     d = {"id": "x", "name": "x", "source_desc": "s", "source_root": str(tmp_path),
          "params": {}, "created_at": 0.0, "phase": "done", "dir": str(tmp_path),
          "items": []}
@@ -61,31 +135,3 @@ def test_from_dict_legacy_layout(tmp_path: Path):
     assert t.images_dir == tmp_path / "images"
     assert t.prompts_dir == tmp_path / "prompts"
     assert t.task_json_path == tmp_path / "task.json"
-    assert t.thumbs_dir == tmp_path / "thumbs"
-
-
-def test_load_latest_recovers_and_cancels(tmp_path: Path, monkeypatch):
-    t = _mk_task(tmp_path)
-    manager.set_status(manager.item(1), "captioned")
-    with manager.lock:
-        manager._task = None
-
-    # 只认 outputs/*/task.json：把任务目录伪装成 outputs 下的旧布局目录
-    fake_out = tmp_path / "outputs"
-    (fake_out / "20260101-000000_x").mkdir(parents=True)
-    (Path(t.dir) / ".studio" / "task.json").rename(
-        fake_out / "20260101-000000_x" / "task.json")
-    monkeypatch.setattr(config, "OUTPUT_ROOT", fake_out)
-
-    assert manager.load_latest() is True
-    cur = manager.current()
-    assert cur.name == "t1"
-    assert cur.items[0].status == "captioned"
-    assert cur.cancel_flag is True        # 历史任务默认中止态，防止误续跑
-
-
-def test_load_latest_when_no_outputs(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(config, "OUTPUT_ROOT", tmp_path / "none")
-    with manager.lock:
-        manager._task = None
-    assert manager.load_latest() is False
