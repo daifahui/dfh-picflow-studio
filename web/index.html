@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prompt Studio</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>Prompt Studio</h1>
+  <span class="sub">本地批量提示词提取 + Qwen-Image-2.1 文生图</span>
+  <span id="health" class="health">…</span>
+</header>
+
+<nav id="tabs">
+  <button data-view="task" class="on">① 任务</button>
+  <button data-view="review">② 审阅 / 进度</button>
+  <button data-view="result">③ 结果</button>
+</nav>
+
+<!-- ============ 视图1：任务 ============ -->
+<main id="view-task">
+  <section class="card">
+    <h2>输入源</h2>
+    <div class="row">
+      <input id="src-path" type="text" placeholder="文件夹路径或压缩包路径（zip / 7z）">
+      <button id="btn-browse">选择文件夹…</button>
+    </div>
+    <div class="row">
+      <input id="src-file" type="file" accept=".zip,.7z">
+    </div>
+    <div class="row">
+      <input id="task-name" type="text" placeholder="任务名（可选，默认时间戳）">
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>生图参数 <small>（默认与 akane 实跑一致，可改）</small></h2>
+    <div class="grid" id="params"></div>
+  </section>
+
+  <section class="card actions">
+    <button id="btn-caption" class="primary">提取提示词</button>
+    <button id="btn-auto" class="primary accent">全自动（提取 + 生成）</button>
+    <p class="hint">「提取提示词」完成后停在审阅页；「全自动」一路跑到底。
+       点击即代表批准启动 llama-server / ComfyUI（16G 显存两阶段串行，服务自动启停）。</p>
+  </section>
+</main>
+
+<!-- ============ 视图2：审阅 / 进度 ============ -->
+<main id="view-review" class="hidden">
+  <section class="card" id="progress-card">
+    <div class="row spread">
+      <h2 id="phase-label">空闲</h2>
+      <div>
+        <button id="btn-stop" class="danger">停止</button>
+        <button id="btn-generate-all" class="primary">全部生成 →</button>
+      </div>
+    </div>
+    <div class="progress"><div id="progress-bar"></div></div>
+    <div id="progress-text" class="hint">等待任务</div>
+  </section>
+
+  <section class="card">
+    <h2>图片 <span id="item-count"></span></h2>
+    <div id="grid" class="grid-imgs"></div>
+  </section>
+</main>
+
+<!-- ============ 视图3：结果 ============ -->
+<main id="view-result" class="hidden">
+  <section class="card">
+    <h2>原图 ↔ 生成图</h2>
+    <div id="result-grid" class="grid-imgs"></div>
+  </section>
+</main>
+
+<!-- ============ 单张详情侧栏 ============ -->
+<aside id="detail" class="hidden">
+  <button id="detail-close" class="ghost">×</button>
+  <div class="detail-imgs">
+    <figure><figcaption>原图</figcaption><img id="detail-src"></figure>
+    <figure id="detail-out-wrap"><figcaption>生成图</figcaption><img id="detail-out"></figure>
+  </div>
+  <label>rewritten_prompt
+    <textarea id="detail-prompt" rows="10"></textarea>
+  </label>
+  <label>wh_ratio <input id="detail-ratio" type="text"></label>
+  <label>注释（重新提取时附加给模型）
+    <textarea id="detail-note" rows="3" placeholder="例：头发改成银白色，不要手表"></textarea>
+  </label>
+  <div class="row">
+    <button id="btn-save" class="ghost">保存修改</button>
+    <button id="btn-recaption" class="primary">带注释重新提取</button>
+    <button id="btn-gen-one" class="primary accent">生图此张</button>
+  </div>
+  <div id="detail-status" class="hint"></div>
+</aside>
+
+<div id="logs"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
