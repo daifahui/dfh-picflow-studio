@@ -70,7 +70,9 @@ async function createTask() {
   }
   if (!source) throw new Error("请填写路径或上传压缩包");
   const body = { source, name: $("#task-name").value.trim(),
-                 params: readParams() };
+                 params: readParams(),
+                 output_image_dir: $("#out-img-dir").value.trim(),
+                 output_prompt_dir: $("#out-prompt-dir").value.trim() };
   const r = await api("/api/task", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body) });
@@ -110,9 +112,15 @@ function cellHTML(it) {
   const cls = it.status.endsWith("failed") ? "failed"
             : it.status === "done" ? "done"
             : it.status === "captioned" ? "captioned" : it.status;
+  const times =
+    (it.caption_ms ? `提取 ${(it.caption_ms / 1000).toFixed(1)}s` : "") +
+    (it.caption_ms && it.generate_ms ? " · " : "") +
+    (it.generate_ms ? `生成 ${(it.generate_ms / 1000).toFixed(1)}s` : "");
   return `<div class="cell ${cls}" data-seq="${it.seq}">
-    <img loading="lazy" src="/api/img/thumb/${it.seq}" alt="">
+    <img loading="lazy" src="/api/img/thumb/${it.seq}" alt=""
+         onload="this.classList.add('ld')">
     <span class="tag">${STATUS_TAG[it.status] || it.status}</span>
+    <span class="meta">${it.wh_ratio || ""}${times ? "　" + times : ""}</span>
     <span class="name">${it.seq}_${it.src_filename}</span></div>`;
 }
 
@@ -159,6 +167,41 @@ function openDetail(seq) {
   $("#detail").classList.add("open");
 }
 $("#detail-close").onclick = () => $("#detail").classList.remove("open");
+
+/* ---------- lightbox（点击侧栏大图全屏预览，Esc/点击关闭） ---------- */
+const lightbox = $("#lightbox");
+function openLightbox(src) { $("#lightbox-img").src = src; lightbox.classList.add("open"); }
+lightbox.onclick = () => lightbox.classList.remove("open");
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") lightbox.classList.remove("open");
+});
+$("#detail-src").onclick = () => openLightbox($("#detail-src").src);
+$("#detail-out").onclick = () => {
+  if ($("#detail-out-wrap").style.visibility !== "hidden")
+    openLightbox($("#detail-out").src);
+};
+
+/* ---------- 视图切换（大/中/小图标、列表、详细信息，仿资源管理器） ---------- */
+const VIEW_CLASS = { lg: "view-lg", md: "view-md", sm: "view-sm",
+                     list: "view-list", details: "view-details" };
+function applyViewMode(mode) {
+  if (!VIEW_CLASS[mode]) mode = "lg";
+  for (const grid of [$("#grid"), $("#result-grid")]) {
+    grid.classList.remove(...Object.values(VIEW_CLASS));
+    grid.classList.add(VIEW_CLASS[mode]);
+  }
+  localStorage.setItem("ps-view-mode", mode);
+}
+for (const sel of [$("#view-mode"), $("#view-mode-result")]) {
+  sel.onchange = (e) => {
+    applyViewMode(e.target.value);
+    for (const other of [$("#view-mode"), $("#view-mode-result")])
+      other.value = e.target.value;
+  };
+}
+applyViewMode(localStorage.getItem("ps-view-mode") || "lg");
+for (const sel of [$("#view-mode"), $("#view-mode-result")]) sel.value =
+  localStorage.getItem("ps-view-mode") || "lg";
 
 $("#btn-save").onclick = async () => {
   const seq = state.selected;

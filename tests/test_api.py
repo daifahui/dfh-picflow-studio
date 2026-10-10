@@ -80,11 +80,56 @@ def test_auto_pipeline_end_to_end(client, image_dir, stub_external):
 
     from server.state import manager
     task_dir = pathlib.Path(manager.current().dir)
-    assert (task_dir / "images" / items[0]["out_image"]).exists()
+    assert (task_dir / items[0]["out_image"]).exists()      # v11：生成图在任务根
     assert len(list((task_dir / "prompts").glob("*.json"))) == 3
-    lines = (task_dir / "prompts_summary.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    summary = task_dir / "prompts" / "prompts_summary.jsonl"
+    lines = summary.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 3 and json.loads(lines[0])["seq"] == 1
-    assert (task_dir / "task.json").exists()
+    assert (task_dir / ".studio" / "task.json").exists()
+
+
+# ---------- 输出双目录（§16.2） ----------
+def test_output_dirs_custom_created_and_reported(client, image_dir, tmp_path):
+    img_out = tmp_path / "prod" / "imgs"
+    prompt_out = tmp_path / "prod" / "words"
+    r = client.post("/api/task", json={
+        "source": str(image_dir), "name": "od",
+        "output_image_dir": str(img_out), "output_prompt_dir": str(prompt_out)})
+    assert r.status_code == 200
+    t = r.json()["task"]
+    assert t["images_dir"] == str(img_out)
+    assert t["prompts_dir"] == str(prompt_out)
+    assert img_out.exists() and prompt_out.exists()          # 创建即建目录
+
+
+def test_output_dir_must_be_absolute(client, image_dir):
+    r = client.post("/api/task", json={
+        "source": str(image_dir), "output_image_dir": "relative/dir"})
+    assert r.status_code == 400
+
+
+def test_task_name_path_chars_sanitized(client, image_dir):
+    r = client.post("/api/task", json={"source": str(image_dir), "name": 'a/b:c*?'})
+    assert r.status_code == 200
+    from server.state import manager
+    assert "/" not in manager.current().id and "\\" not in manager.current().id
+
+
+def test_generate_writes_to_custom_output_dirs(client, image_dir, stub_external,
+                                               tmp_path):
+    img_out = tmp_path / "custom_imgs"
+    prompt_out = tmp_path / "custom_words"
+    client.post("/api/task", json={
+        "source": str(image_dir), "name": "cust",
+        "output_image_dir": str(img_out), "output_prompt_dir": str(prompt_out)})
+    client.post("/api/task/caption")
+    wait_phase(client, "reviewing")
+    client.post("/api/task/generate")
+    data = wait_phase(client, "done")
+    assert (img_out / data["items"][0]["out_image"]).exists()
+    assert (prompt_out / "0001.json").exists()
+    assert (prompt_out / "prompts_summary.jsonl").exists()
+    assert client.get("/api/img/out/1").status_code == 200   # 自定义目录可安全访问
 
 
 def test_caption_only_stops_at_reviewing(client, image_dir, stub_external):

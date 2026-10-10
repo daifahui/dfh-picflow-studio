@@ -33,6 +33,12 @@
     <div class="row">
       <input id="task-name" type="text" placeholder="任务名（可选，默认时间戳）">
     </div>
+    <div class="row">
+      <input id="out-img-dir" type="text" placeholder="图片输出目录（可选，默认 outputs/&lt;任务名&gt;）">
+    </div>
+    <div class="row">
+      <input id="out-prompt-dir" type="text" placeholder="提示词输出目录（可选，默认 图片输出目录/prompts）">
+    </div>
   </section>
 
   <section class="card">
@@ -63,16 +69,34 @@
   </section>
 
   <section class="card">
-    <h2>图片 <span id="item-count"></span></h2>
-    <div id="grid" class="grid-imgs"></div>
+    <div class="row spread">
+      <h2>图片 <span id="item-count"></span></h2>
+      <select id="view-mode" class="view-mode" title="视图切换">
+        <option value="lg">大图标</option>
+        <option value="md">中图标</option>
+        <option value="sm">小图标</option>
+        <option value="list">列表</option>
+        <option value="details">详细信息</option>
+      </select>
+    </div>
+    <div id="grid" class="grid-imgs view-lg"></div>
   </section>
 </main>
 
 <!-- ============ 视图3：结果 ============ -->
 <main id="view-result" class="hidden">
   <section class="card">
-    <h2>原图 ↔ 生成图</h2>
-    <div id="result-grid" class="grid-imgs"></div>
+    <div class="row spread">
+      <h2>原图 ↔ 生成图</h2>
+      <select id="view-mode-result" class="view-mode" title="视图切换">
+        <option value="lg">大图标</option>
+        <option value="md">中图标</option>
+        <option value="sm">小图标</option>
+        <option value="list">列表</option>
+        <option value="details">详细信息</option>
+      </select>
+    </div>
+    <div id="result-grid" class="grid-imgs view-lg"></div>
   </section>
 </main>
 
@@ -99,6 +123,9 @@
 </aside>
 
 <div id="logs"></div>
+
+<!-- lightbox：点击侧栏大图全屏预览 -->
+<div id="lightbox"><img id="lightbox-img" alt=""></div>
 
 <script src="/static/app.js"></script>
 </body>

@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import datetime as _dt
 import json
+import re
 import subprocess
 import threading
 import time
@@ -107,6 +108,16 @@ def _item_dict(it: Item) -> dict:
     }
 
 
+def _uniquify_dir(base: Path) -> Path:
+    """任务目录名冲突时追加 -2、-3……（AI 命名/同名任务可共存）。"""
+    if not base.exists():
+        return base
+    i = 2
+    while (base.parent / f"{base.name}-{i}").exists():
+        i += 1
+    return base.parent / f"{base.name}-{i}"
+
+
 @app.post("/api/task")
 def create_task(body: dict = Body(...)) -> dict:
     if manager.current() and not manager.current().cancel_flag:
@@ -115,12 +126,23 @@ def create_task(body: dict = Body(...)) -> dict:
     if not source or not Path(source).exists():
         raise HTTPException(400, f"输入源不存在：{source}")
 
+    # 输出双目录（§16.2）：可分别指定；缺省 图片=任务目录、提示词=<图片输出>/prompts
+    img_out = str(body.get("output_image_dir") or "").strip()
+    prompt_out = str(body.get("output_prompt_dir") or "").strip()
+    for label, val in (("图片输出目录", img_out), ("提示词输出目录", prompt_out)):
+        if val and not Path(val).is_absolute():
+            raise HTTPException(400, f"{label}须为绝对路径：{val}")
+
     params = dict(config.DEFAULT_PARAMS)
     params.update({k: v for k, v in (body.get("params") or {}).items()
                    if k in params})
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    name = body.get("name") or stamp
-    task_dir = config.OUTPUT_ROOT / f"{stamp}_{name}"
+    name = re.sub(r'[\\/:*?"<>|]', "_", str(body.get("name") or stamp).strip()) or stamp
+    task_dir = _uniquify_dir(config.OUTPUT_ROOT / name)
+    images_dir = Path(img_out) if img_out else task_dir
+    prompts_dir = Path(prompt_out) if prompt_out else images_dir / "prompts"
+    for d in (task_dir, images_dir, prompts_dir):
+        d.mkdir(parents=True, exist_ok=True)
     src = Path(source)
 
     if src.is_dir():
@@ -128,17 +150,20 @@ def create_task(body: dict = Body(...)) -> dict:
         if not files:
             raise HTTPException(400, "文件夹内没有图片")
         items, source_root = input_ingest.build_items(
-            files, src, keep_in_place=True, task_source_dir=task_dir / "source")
+            files, src, keep_in_place=True,
+            task_source_dir=task_dir / ".studio" / "source")
     elif src.suffix.lower() in (".zip", ".7z"):
-        files = input_ingest.extract_archive(src, task_dir / "source")
+        files = input_ingest.extract_archive(src, task_dir / ".studio" / "source")
         if not files:
             raise HTTPException(400, "压缩包内没有图片")
         items, source_root = input_ingest.build_items(
-            files, src, keep_in_place=False, task_source_dir=task_dir / "source")
+            files, src, keep_in_place=False,
+            task_source_dir=task_dir / ".studio" / "source")
     else:
         raise HTTPException(400, "输入源须为文件夹或 zip/7z 压缩包")
 
-    task = manager.create(name, str(src), Path(source_root), params, items, task_dir)
+    task = manager.create(name, str(src), Path(source_root), params, items, task_dir,
+                          output_image_dir=img_out, output_prompt_dir=prompt_out)
     sse.hub.publish("log", text=f"任务创建：{len(items)} 张图片 → {task_dir.name}")
     return get_task()
 
@@ -239,8 +264,8 @@ def _run_generate(seqs: list[int] | None) -> None:
                         else t.params["seed"] + it.seq  # 单张重跑换种子求变化
                 png = comfy_client.generate_one(
                     it.contract, t.params, seed, prefix=f"{it.seq:04d}")
-                out_dir = Path(t.dir) / "images"
-                out_dir.mkdir(exist_ok=True)
+                out_dir = t.images_dir
+                out_dir.mkdir(parents=True, exist_ok=True)
                 out_name = f"{Path(it.src_filename).stem}.png"
                 (out_dir / out_name).write_bytes(png)
                 with manager.lock:
@@ -271,10 +296,10 @@ def _append_summary(it: Item) -> None:
     t = manager.current()
     line = json.dumps({"seq": it.seq, "file": it.src_filename, **(it.contract or {})},
                       ensure_ascii=False)
-    with open(Path(t.dir) / "prompts_summary.jsonl", "a", encoding="utf-8") as f:
+    pdir = t.prompts_dir
+    pdir.mkdir(parents=True, exist_ok=True)
+    with open(pdir / "prompts_summary.jsonl", "a", encoding="utf-8") as f:
         f.write(line + "\n")
-    pdir = Path(t.dir) / "prompts"
-    pdir.mkdir(exist_ok=True)
     (pdir / f"{it.seq:04d}.json").write_text(
         json.dumps({"file": it.src_filename, **it.contract}, ensure_ascii=False, indent=1),
         encoding="utf-8")
@@ -376,7 +401,8 @@ def recaption_item(seq: int, body: dict = Body(default={})) -> dict:
 # ======================================================================
 def _safe_file(path: Path) -> Path:
     t = manager.current()
-    roots = [str(Path(t.source_root).resolve()), str(Path(t.dir).resolve())] if t else []
+    roots = [str(Path(t.source_root).resolve()), str(Path(t.dir).resolve()),
+             str(t.images_dir.resolve()), str(t.prompts_dir.resolve())] if t else []
     rp = path.resolve()
     if any(str(rp).startswith(r) for r in roots) and rp.is_file():
         return rp
@@ -406,10 +432,10 @@ def img_thumb(seq: int) -> FileResponse:
     if not it:
         raise HTTPException(404)
     t = manager.current()
-    thumb_dir = Path(t.dir) / "thumbs"
+    thumb_dir = t.thumbs_dir
     thumb = thumb_dir / f"{it.seq:04d}.webp"
     if not thumb.exists():
-        thumb_dir.mkdir(exist_ok=True)
+        thumb_dir.mkdir(parents=True, exist_ok=True)
         with Image.open(_safe_file(Path(it.src_path))) as im:
             im.thumbnail((512, 512))
             im.convert("RGB").save(thumb, "WEBP", quality=80)
@@ -422,7 +448,7 @@ def img_out(seq: int) -> FileResponse:
     if not it or not it.out_image:
         raise HTTPException(404)
     t = manager.current()
-    p = _safe_file(Path(t.dir) / "images" / it.out_image)
+    p = _safe_file(t.images_dir / it.out_image)
     return FileResponse(p, media_type=_mime(p))
 
 

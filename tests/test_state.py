@@ -26,15 +26,42 @@ def test_create_and_item_lookup(tmp_path: Path):
 def test_set_status_persists_task_json(tmp_path: Path):
     t = _mk_task(tmp_path)
     manager.set_status(manager.item(1), "captioned")
-    d = json.loads((Path(t.dir) / "task.json").read_text(encoding="utf-8"))
+    d = json.loads((Path(t.dir) / ".studio" / "task.json").read_text(encoding="utf-8"))
     assert d["items"][0]["status"] == "captioned"
 
 
 def test_save_is_atomic_no_tmp_leftover(tmp_path: Path):
     t = _mk_task(tmp_path)
     manager.set_status(manager.item(1), "done")
-    leftovers = list(Path(t.dir).glob("*.tmp"))
+    leftovers = list((Path(t.dir) / ".studio").glob("*.tmp"))
     assert leftovers == []
+
+
+def test_v11_default_paths(tmp_path: Path):
+    """新布局：图片在任务根、提示词在 prompts/、簿记在 .studio/；双输出目录可覆盖。"""
+    t = _mk_task(tmp_path)
+    assert t.images_dir == Path(t.dir)
+    assert t.prompts_dir == Path(t.dir) / "prompts"
+    assert t.task_json_path == Path(t.dir) / ".studio" / "task.json"
+    assert t.thumbs_dir == Path(t.dir) / ".studio" / "thumbs"
+
+    t.output_image_dir = r"D:\out"
+    assert t.prompts_dir == Path(r"D:\out") / "prompts"     # 默认跟随图片输出目录
+    t.output_prompt_dir = r"E:\words"
+    assert t.prompts_dir == Path(r"E:\words")               # 显式指定优先
+
+
+def test_from_dict_legacy_layout(tmp_path: Path):
+    """v1.0 旧 task.json（无 output_image_dir 字段）→ 自动识别 v10 只读布局。"""
+    d = {"id": "x", "name": "x", "source_desc": "s", "source_root": str(tmp_path),
+         "params": {}, "created_at": 0.0, "phase": "done", "dir": str(tmp_path),
+         "items": []}
+    t = Task.from_dict(d)
+    assert t.layout == "v10"
+    assert t.images_dir == tmp_path / "images"
+    assert t.prompts_dir == tmp_path / "prompts"
+    assert t.task_json_path == tmp_path / "task.json"
+    assert t.thumbs_dir == tmp_path / "thumbs"
 
 
 def test_load_latest_recovers_and_cancels(tmp_path: Path, monkeypatch):
@@ -43,10 +70,11 @@ def test_load_latest_recovers_and_cancels(tmp_path: Path, monkeypatch):
     with manager.lock:
         manager._task = None
 
-    # 只认 outputs/*/task.json：把任务目录伪装成 outputs 下的最新目录
+    # 只认 outputs/*/task.json：把任务目录伪装成 outputs 下的旧布局目录
     fake_out = tmp_path / "outputs"
     (fake_out / "20260101-000000_x").mkdir(parents=True)
-    (Path(t.dir) / "task.json").rename(fake_out / "20260101-000000_x" / "task.json")
+    (Path(t.dir) / ".studio" / "task.json").rename(
+        fake_out / "20260101-000000_x" / "task.json")
     monkeypatch.setattr(config, "OUTPUT_ROOT", fake_out)
 
     assert manager.load_latest() is True

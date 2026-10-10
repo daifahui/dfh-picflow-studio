@@ -67,6 +67,37 @@ button.ghost { background: none; }
 .cell .name { position: absolute; left: 0; right: 0; bottom: 0; font-size: 10px;
   padding: 2px 6px; background: #000a; color: var(--dim); white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis; }
+.cell .meta { display: none; }
+
+/* 图片 blur-in（缩略图加载完成后 200ms 过渡清晰） */
+.cell img { filter: blur(10px) saturate(.7); opacity: .55; transition: filter .2s, opacity .2s; }
+.cell img.ld { filter: none; opacity: 1; }
+
+/* 视图切换（仿资源管理器：大/中/小图标、列表、详细信息） */
+.view-mode { width: auto !important; font-size: 12px; padding: 4px 8px !important; }
+.grid-imgs.view-md { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
+.grid-imgs.view-sm { grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); gap: 6px; }
+.grid-imgs.view-list { grid-template-columns: 1fr; gap: 4px; }
+.grid-imgs.view-list .cell { display: flex; align-items: center; }
+.grid-imgs.view-list .cell img { width: 44px; height: 44px; aspect-ratio: 1; }
+.grid-imgs.view-list .cell .name { position: static; flex: 1; background: none;
+  font-size: 12px; padding: 0 8px; }
+.grid-imgs.view-list .cell .tag { position: static; margin-right: 6px; }
+.grid-imgs.view-details { grid-template-columns: 1fr; gap: 0; border: 1px solid var(--line);
+  border-radius: 8px; overflow: hidden; }
+.grid-imgs.view-details .cell { display: grid; grid-template-columns: 44px 1fr auto auto;
+  align-items: center; border: none; border-bottom: 1px solid var(--line); border-radius: 0; }
+.grid-imgs.view-details .cell img { width: 44px; height: 44px; }
+.grid-imgs.view-details .cell .name { position: static; background: none; font-size: 12px; }
+.grid-imgs.view-details .cell .tag { position: static; }
+.grid-imgs.view-details .cell .meta { display: inline; padding-right: 10px;
+  font-size: 11px; color: var(--dim); }
+
+/* lightbox 全屏预览 */
+#lightbox { position: fixed; inset: 0; background: #000000e6; display: none;
+  align-items: center; justify-content: center; z-index: 100; cursor: zoom-out; }
+#lightbox.open { display: flex; }
+#lightbox img { max-width: 94vw; max-height: 94vh; border-radius: 6px; }
 
 aside#detail { position: fixed; top: 0; right: -520px; width: 500px; height: 100vh;
   background: var(--card); border-left: 1px solid var(--line); padding: 16px;

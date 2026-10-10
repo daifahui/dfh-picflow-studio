@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields as dc_fields
 from pathlib import Path
 
 from . import config
@@ -41,7 +41,45 @@ class Task:
     phase: str = "idle"           # idle / captioning / reviewing / generating / done / stopped
     cancel_flag: bool = False
     items: list[Item] = field(default_factory=list)
-    dir: str = ""                 # 任务输出目录绝对路径
+    dir: str = ""                 # 任务工作目录绝对路径（内含 .studio/ 簿记）
+    layout: str = "v11"           # v11=新布局（图在任务根）；v10=旧布局（只读兼容）
+    output_image_dir: str = ""    # 图片输出目录（空 = 任务目录本身）
+    output_prompt_dir: str = ""   # 提示词输出目录（空 = <图片输出>/prompts）
+
+    # ---- 路径解析（v11 双输出目录 / v10 旧布局兼容，见设计文档 §7/§16.2）----
+    @property
+    def images_dir(self) -> Path:
+        if self.output_image_dir:
+            return Path(self.output_image_dir)
+        d = Path(self.dir)
+        return d / "images" if self.layout == "v10" else d
+
+    @property
+    def prompts_dir(self) -> Path:
+        if self.output_prompt_dir:
+            return Path(self.output_prompt_dir)
+        if self.layout == "v10":
+            return Path(self.dir) / "prompts"
+        return Path(self.output_image_dir or self.dir) / "prompts"
+
+    @property
+    def thumbs_dir(self) -> Path:
+        d = Path(self.dir)
+        return d / "thumbs" if self.layout == "v10" else d / ".studio" / "thumbs"
+
+    @property
+    def task_json_path(self) -> Path:
+        d = Path(self.dir)
+        return d / "task.json" if self.layout == "v10" else d / ".studio" / "task.json"
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Task":
+        """容错反序列化：容忍未知字段（向前兼容），旧文件自动识别为 v10 布局。"""
+        items = [Item(**i) for i in d.pop("items")]
+        if "output_image_dir" not in d:
+            d["layout"] = "v10"
+        known = {f.name for f in dc_fields(cls)}
+        return cls(items=items, **{k: v for k, v in d.items() if k in known})
 
     def summary(self) -> dict:
         c = {"pending": 0, "captioned": 0, "done": 0, "failed": 0}
@@ -55,7 +93,8 @@ class Task:
             else:
                 c["pending"] += 1
         return {"id": self.id, "name": self.name, "phase": self.phase,
-                "source": self.source_desc, "total": len(self.items), "counts": c}
+                "source": self.source_desc, "total": len(self.items), "counts": c,
+                "images_dir": str(self.images_dir), "prompts_dir": str(self.prompts_dir)}
 
 
 class TaskManager:
@@ -80,12 +119,15 @@ class TaskManager:
             return self._task
 
     def create(self, name: str, source_desc: str, source_root: Path, params: dict,
-               items: list[Item], task_dir: Path) -> Task:
+               items: list[Item], task_dir: Path,
+               output_image_dir: str = "", output_prompt_dir: str = "") -> Task:
         with self._lock:
             self._task = Task(
                 id=task_dir.name, name=name, source_desc=source_desc,
                 source_root=str(source_root), params=params, items=items,
                 dir=str(task_dir),
+                output_image_dir=output_image_dir,
+                output_prompt_dir=output_prompt_dir,
             )
             self.save()
             return self._task
@@ -110,23 +152,24 @@ class TaskManager:
         if not t:
             return
         d = asdict(t)
-        path = Path(t.dir) / "task.json"
+        path = t.task_json_path
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
         tmp.replace(path)
 
     def load_latest(self) -> bool:
-        """启动时回看 outputs/ 下最新的 task.json（断点续跑入口）。"""
+        """启动时回看 outputs/ 下最新的 task.json（断点续跑入口）。
+        同时认新旧两种布局：v11 在 <任务>/.studio/task.json，v10 在 <任务>/task.json。"""
         if not config.OUTPUT_ROOT.exists():
             return False
-        candidates = sorted(config.OUTPUT_ROOT.glob("*/task.json"),
-                            key=lambda p: p.parent.name, reverse=True)
+        candidates = list(config.OUTPUT_ROOT.glob("*/.studio/task.json")) + \
+            list(config.OUTPUT_ROOT.glob("*/task.json"))
+        candidates.sort(key=lambda p: p.parent.name if p.parent.name != ".studio"
+                        else p.parent.parent.name, reverse=True)
         for path in candidates:
             try:
-                d = json.loads(path.read_text(encoding="utf-8"))
-                items = [Item(**i) for i in d.pop("items")]
-                t = Task(**d, items=items)
+                t = Task.from_dict(json.loads(path.read_text(encoding="utf-8")))
                 t.cancel_flag = True   # 历史任务默认视为已中止，防止误续跑
                 with self._lock:
                     self._task = t

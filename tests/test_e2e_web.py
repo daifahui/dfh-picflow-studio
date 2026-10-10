@@ -170,3 +170,36 @@ def test_generate_all_renders_result_view(page, image_dir):
     page.click('button[data-view="result"]')
     page.wait_for_selector("#result-grid .cell", timeout=5000)
     assert page.locator("#result-grid .cell").count() == 3
+
+
+def test_view_mode_switcher_and_persistence(page, image_dir):
+    """§16.3：网格视图切换（大/中/小图标、列表、详细信息），选择存 localStorage。"""
+    page.goto(BASE)
+    page.fill("#src-path", str(image_dir))
+    page.click("#btn-caption")
+    page.wait_for_selector(".cell", timeout=15000)
+
+    page.select_option("#view-mode", "details")
+    page.wait_for_function(
+        "document.querySelector('#grid').classList.contains('view-details')")
+    page.wait_for_function(
+        "document.querySelector('#result-grid').classList.contains('view-details')")
+    page.reload()
+    page.wait_for_function(
+        "document.querySelector('#grid').classList.contains('view-details')",
+        timeout=8000)                                  # 刷新后记忆保持
+
+
+def test_lightbox_opens_and_closes(page, image_dir):
+    """§16.3：详情侧栏大图点击 → 全屏 lightbox，Esc 关闭。"""
+    page.goto(BASE)
+    page.fill("#src-path", str(image_dir))
+    page.click("#btn-caption")
+    page.wait_for_selector(".cell.captioned", timeout=15000)
+    page.click(".cell >> nth=0")
+    page.click("#detail-src")
+    page.wait_for_function(
+        "document.querySelector('#lightbox').classList.contains('open')")
+    page.keyboard.press("Escape")
+    page.wait_for_function(
+        "!document.querySelector('#lightbox').classList.contains('open')")
