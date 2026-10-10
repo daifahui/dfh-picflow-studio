@@ -104,6 +104,38 @@ def test_generate_one_after_caption(client, image_dir, stub_external):
     assert data["items"][0]["status"] == "captioned"     # 其余不受影响
 
 
+def test_generate_stops_owned_llm_before_comfy(client, image_dir, stub_external,
+                                               monkeypatch):
+    """显存互斥回归（设计 §3.3）：本服务器代管的 llama-server 必须在
+    ensure_comfy 之前关闭，与请求参数无关。"""
+    from server import llm_caption
+    calls: list[str] = []
+    monkeypatch.setattr(llm_caption, "stop_llm", lambda: calls.append("stop_llm"))
+    monkeypatch.setattr(llm_caption, "_owned_proc", object())   # 模拟 caption 阶段拉起的实例
+
+    client.post("/api/task", json={"source": str(image_dir)})
+    client.post("/api/task/caption")
+    wait_phase(client, "reviewing")
+    client.post("/api/task/generate")                    # 前端「全部生成」的原始调用（无附加参数）
+    wait_phase(client, "done")
+    assert calls == ["stop_llm"]
+
+
+def test_generate_reuses_external_llm(client, image_dir, stub_external, monkeypatch):
+    """外部手动启动的 llama-server（非代管）只复用、不关闭。"""
+    from server import llm_caption
+    calls: list[str] = []
+    monkeypatch.setattr(llm_caption, "stop_llm", lambda: calls.append("stop_llm"))
+    assert not llm_caption.owns_llm()                    # ensure_llm 已被桩掉，全程无代管进程
+
+    client.post("/api/task", json={"source": str(image_dir)})
+    client.post("/api/task/caption")
+    wait_phase(client, "reviewing")
+    client.post("/api/task/generate")
+    wait_phase(client, "done")
+    assert calls == []
+
+
 def test_recaption_records_note_and_reruns(client, image_dir, stub_external, monkeypatch):
     seen = {}
     from server import llm_caption

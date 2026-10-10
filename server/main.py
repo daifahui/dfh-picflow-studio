@@ -201,16 +201,18 @@ def _run_caption(seqs: list[int] | None) -> None:
                 sse.hub.publish("item", **_item_dict(it))
         with manager.lock:
             t.phase = "reviewing"
+        manager.save()
         sse.hub.publish("phase", phase="reviewing")
     except _Cancelled:
         with manager.lock:
             t.phase = "stopped"
+        manager.save()
         sse.hub.publish("phase", phase="stopped")
     finally:
         manager.worker_busy.release()
 
 
-def _run_generate(seqs: list[int] | None, owned_llm: bool) -> None:
+def _run_generate(seqs: list[int] | None) -> None:
     t = manager.current()
     try:
         manager.worker_busy.acquire()
@@ -218,8 +220,8 @@ def _run_generate(seqs: list[int] | None, owned_llm: bool) -> None:
             t.phase = "generating"
             t.cancel_flag = False
         sse.hub.publish("phase", phase="generating")
-        if owned_llm:
-            llm_caption.stop_llm()          # 显存互斥：先释放 caption 模型
+        if llm_caption.owns_llm():
+            llm_caption.stop_llm()     # 显存互斥：进 ComfyUI 前释放代管的 caption 模型（外部实例只复用）
         comfy_client.ensure_comfy()
         targets = [it for it in t.items if it.contract and
                    (not seqs or it.seq in seqs)]
@@ -253,11 +255,13 @@ def _run_generate(seqs: list[int] | None, owned_llm: bool) -> None:
             comfy_client.stop_comfy()
         with manager.lock:
             t.phase = "done" if not t.cancel_flag else "stopped"
+        manager.save()
         sse.hub.publish("phase", phase=t.phase)
     except _Cancelled:
         comfy_client.stop_comfy()
         with manager.lock:
             t.phase = "stopped"
+        manager.save()
         sse.hub.publish("phase", phase="stopped")
     finally:
         manager.worker_busy.release()
@@ -299,8 +303,7 @@ def start_generate(body: dict = Body(default={})) -> dict:
     manager.worker_busy.release()
     seqs = body.get("seqs")
     threading.Thread(target=_run_generate,
-                     kwargs={"seqs": seqs, "owned_llm": bool(body.get("after_caption"))},
-                     daemon=True).start()
+                     kwargs={"seqs": seqs}, daemon=True).start()
     return {"ok": True}
 
 
@@ -318,7 +321,7 @@ def start_auto() -> dict:
         _run_caption(None)
         cur = manager.current()
         if cur and cur.phase == "reviewing":     # 未被中止才继续
-            _run_generate(None, owned_llm=True)
+            _run_generate(None)
     threading.Thread(target=_auto, daemon=True).start()
     return {"ok": True}
 

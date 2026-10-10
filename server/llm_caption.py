@@ -6,6 +6,7 @@ skill 策略（设计文档 §12 已定）：实时读取 pi 的 skill 目录，
 from __future__ import annotations
 
 import base64
+import io
 import json
 import re
 import subprocess
@@ -13,6 +14,7 @@ import time
 from pathlib import Path
 
 import httpx
+from PIL import Image
 
 from . import config, sse
 
@@ -74,6 +76,11 @@ def ensure_llm() -> None:
     raise RuntimeError("llama-server 启动超时（详见 logs/llama-server.log）")
 
 
+def owns_llm() -> bool:
+    """当前 llama-server 是否为本服务器拉起（外部实例不属于代管范围）。"""
+    return _owned_proc is not None
+
+
 def stop_llm() -> None:
     """只关闭本模块拉起的进程；用户手动的实例不动。"""
     global _owned_proc
@@ -91,10 +98,20 @@ _JSON = re.compile(r"\{.*\}", re.S)
 _RATIO = re.compile(r"^\s*\d+\s*:\s*\d+\s*$")
 
 
+_PASSTHRU = {"png", "jpg", "jpeg"}     # llama-server 端 stb_image 原生支持的格式
+
+
 def _b64_image_url(path: Path) -> str:
-    suffix = "jpeg" if path.suffix.lower() in (".jpg", ".jpeg") else path.suffix.lower().lstrip(".")
-    data = base64.b64encode(path.read_bytes()).decode()
-    return f"data:image/{suffix};base64,{data}"
+    suffix = path.suffix.lower().lstrip(".")
+    if suffix in _PASSTHRU:
+        data = base64.b64encode(path.read_bytes()).decode()
+        return f"data:image/{'jpeg' if suffix == 'jpg' else suffix};base64,{data}"
+    # webp/bmp/gif 等在 llama-server 端解码失败（2026-10-10 E2E 实证）→ 先转 PNG
+    buf = io.BytesIO()
+    with Image.open(path) as im:
+        im.convert("RGB").save(buf, "PNG")
+    data = base64.b64encode(buf.getvalue()).decode()
+    return f"data:image/png;base64,{data}"
 
 
 def _parse_contract(text: str) -> dict:

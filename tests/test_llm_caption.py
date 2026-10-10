@@ -108,6 +108,26 @@ def test_caption_image_exhausts_retries():
 
 
 @respx.mock
+def test_caption_image_converts_webp_to_png():
+    """llama-server 端解码不了 webp（2026-10-10 E2E 抓出）：发送前必须转 PNG。"""
+    import io
+
+    from PIL import Image as PILImage
+    route = respx.post(f"{BASE}/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=_chat(GOOD)))
+    img = Path(__file__).parent / "data_img.webp"
+    buf = io.BytesIO()
+    PILImage.new("RGB", (16, 16), (10, 20, 30)).save(buf, "WEBP")
+    img.write_bytes(buf.getvalue())
+
+    llm_caption.caption_image(img)
+    body = route.calls.last.request.read().decode()
+    assert "data:image/webp" not in body
+    assert "data:image/png;base64" in body
+    img.unlink()
+
+
+@respx.mock
 def test_caption_image_appends_note():
     route = respx.post(f"{BASE}/v1/chat/completions").mock(
         return_value=httpx.Response(200, json=_chat(GOOD)))

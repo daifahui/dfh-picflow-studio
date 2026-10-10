@@ -27,3 +27,4 @@ Desktop.ini
 .coverage
 logs/
 pytest_cache/
+acceptance_images/
