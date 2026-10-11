@@ -499,8 +499,9 @@ FastAPI 后端 (server/)
 
 ### 18.1 已验证的对接口径（本轮实测探明）
 
-- `TextEncodeQwenImage21`（comfy_extras/nodes_qwen.py）：autogrow 输入 `images.image_1..image_16`
-  ——**参考图硬上限 16 张**，按编号排序拼入视觉序列，并输出「参考 latent」（第三个输出口）；
+- `TextEncodeQwenImage21`（comfy_extras/nodes_qwen.py）：autogrow 输入 `images.image_1..N`
+  （官方口径 12 张、源码定义 16 张）——**产品上限按用户要求定为 6 张**
+  （`MULTI_MAX_IMAGES`），按编号排序拼入视觉序列，并输出「参考 latent」（第三个输出口）；
   参考图按 resolution 预算（1024）缩放。
 - edit 等价 API 图：`UNETLoader → QwenImage21Cache(device=auto) → KSampler.model`；
   `TextEncodeQwenImage21(clip, vae, prompt, negative_prompt, resolution, images.image_N)`
@@ -530,7 +531,7 @@ FastAPI 后端 (server/)
   `faceswap`（换脸）——asset 与 faceswap 共用 multi 管线，仅默认模板不同。
 - **输入**：文件夹 / zip·7z（复用现有摄取）或 **多文件上传**（新增 `POST /api/upload/batch`，
   前端 `<input multiple>`）；图片自然排序编号 = `<image1>..<imageN>`；
-  数量上限 `MULTI_MAX_IMAGES = 8`（节点硬上限 16，留余量；导入超限 400）。
+  数量上限 `MULTI_MAX_IMAGES = 6`（用户定版；导入超限 400）。
   角色约定写进模板文案（asset：`<image1>`=人物、`<image2>`=服装、`<image3+>`=参考；
   faceswap：`<image1>`=主图、`<image2+>`=目标脸，多脸可提升还原度）。
 - **提示词模板**：`config.DEFAULT_TEMPLATES[kind]` 默认模板，导入时填入可编辑文本框
