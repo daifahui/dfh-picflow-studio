@@ -60,6 +60,11 @@ class Task:
     mode: str = "auto"            # auto=全自动 / review=停在审阅
     ai_name: bool = True          # 首图契约产出后允许 AI 改名（用户手动改名后失效）
     renamed: bool = False         # 用户手动改过名（AI 不再覆盖）
+    kind: str = "t2i"             # t2i=N图N产物 / asset·faceswap=多图编辑类（§18.3）
+
+    @property
+    def is_multi(self) -> bool:
+        return self.kind in ("asset", "faceswap")
 
     # ---- 路径解析（v11 双输出目录 / v10 旧布局兼容，见设计文档 §7/§16.2）----
     @property
@@ -111,7 +116,7 @@ class Task:
 
     def summary(self) -> dict:
         return {"id": self.id, "name": self.name, "phase": self.phase,
-                "mode": self.mode, "source": self.source_desc,
+                "mode": self.mode, "kind": self.kind, "source": self.source_desc,
                 "total": len(self.items), "counts": self.counts(),
                 "images_dir": str(self.images_dir),
                 "prompts_dir": str(self.prompts_dir)}
@@ -166,7 +171,8 @@ class WorkspaceManager:
     def create_task(self, name: str, source_desc: str, source_root: Path,
                     params: dict, items: list[Item], task_dir: Path,
                     output_image_dir: str = "", output_prompt_dir: str = "",
-                    mode: str = "auto", ai_name: bool = True) -> Task:
+                    mode: str = "auto", ai_name: bool = True,
+                    kind: str = "t2i") -> Task:
         with self._lock:
             t = Task(
                 id=task_dir.name, name=name, source_desc=source_desc,
@@ -174,7 +180,7 @@ class WorkspaceManager:
                 dir=str(task_dir),
                 output_image_dir=output_image_dir,
                 output_prompt_dir=output_prompt_dir,
-                mode=mode, ai_name=ai_name,
+                mode=mode, ai_name=ai_name, kind=kind,
             )
             self._tasks[t.id] = t
             if t.id not in self._queue:

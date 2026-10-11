@@ -20,6 +20,7 @@ from . import config, sse
 
 _skill_warned = False
 _owned_proc: subprocess.Popen | None = None
+_current_profile: str | None = None
 
 
 # ---------- skill ----------
@@ -39,34 +40,68 @@ def read_skill_system_prompt() -> str:
     return "\n\n---\n\n".join(parts)
 
 
-# ---------- llama-server 生命周期 ----------
-def is_llm_up() -> bool:
+# ---------- llama-server 生命周期（档位化，§18.2） ----------
+def _profile(profile_key: str | None) -> dict:
+    return config.LM_PROFILES.get(profile_key) or config.LM_PROFILES["iq2_m_64k"]
+
+
+def current_llm_alias() -> str | None:
     try:
-        r = httpx.get(f"{config.LM_API_BASE}/v1/models", timeout=3)
-        return r.status_code == 200
-    except Exception:  # noqa: BLE001 —— 未启动时连接被拒，属正常态
-        return False
+        # 本机对关闭端口要 ~2s 才连接失败（防火墙 DROP），超时必须远小于它
+        r = httpx.get(f"{config.LM_API_BASE}/v1/models", timeout=0.5)
+        if r.status_code == 200:
+            data = r.json().get("data") or []
+            return data[0].get("id") if data else None
+    except Exception:  # noqa: BLE001
+        return None
+    return None
 
 
-def start_llama_server() -> None:
-    """拉起 iq2_m 64K 档脚本（后台隐藏窗口，日志写 logs/llama-server.log）。"""
-    global _owned_proc
+def is_llm_up() -> bool:
+    return current_llm_alias() is not None
+
+
+def _active_alias() -> str:
+    """当前应使用的模型名：代管实例按档位，外部实例按其实际 alias。"""
+    if _current_profile:
+        return _profile(_current_profile)["alias"]
+    return current_llm_alias() or config.LM_PROFILES["iq2_m_64k"]["alias"]
+
+
+def start_llama_server(profile_key: str) -> None:
+    """拉起指定档位脚本（后台隐藏窗口，日志写 logs/llama-server.log）。"""
+    global _owned_proc, _current_profile
+    p = _profile(profile_key)
     config.LOG_DIR.mkdir(exist_ok=True)
     log = open(config.LOG_DIR / "llama-server.log", "ab")
     _owned_proc = subprocess.Popen(
-        ["cmd", "/c", "start", "/wait", "/b", "", str(config.LLAMA_SERVER_CMD)],
+        ["cmd", "/c", "start", "/wait", "/b", "", str(p["cmd"])],
         stdout=log, stderr=subprocess.STDOUT,
         creationflags=subprocess.CREATE_NO_WINDOW,
-        cwd=str(config.LLAMA_SERVER_CMD.parent),
+        cwd=str(Path(p["cmd"]).parent),
     )
+    _current_profile = profile_key
 
 
-def ensure_llm() -> None:
+def ensure_llm(profile_key: str = "iq2_m_64k") -> None:
+    want = _profile(profile_key)
     if is_llm_up():
-        sse.hub.publish("log", text="llama-server 已在运行（复用现有实例，结束时不关闭）")
-        return
-    sse.hub.publish("log", text="启动 llama-server（iq2_m 64K 视觉档）…")
-    start_llama_server()
+        if current_llm_alias() == want["alias"]:
+            how = "代管" if owns_llm() else "外部"
+            sse.hub.publish("log", text=f"llama-server 已运行（{how}，档位匹配，复用）")
+            return
+        if owns_llm():
+            sse.hub.publish(
+                "log", text=f"切换语言模型档位：{current_llm_alias()} → {want['alias']}…")
+            stop_llm()
+        else:
+            sse.hub.publish(
+                "log",
+                text=f"[warn] 外部 llama-server 档位不符（{current_llm_alias()}），"
+                     f"按约束只复用不关闭；预期档位 {want['alias']}")
+            return
+    sse.hub.publish("log", text=f"启动 llama-server（{want['label']}）…")
+    start_llama_server(profile_key)
     deadline = time.time() + config.SERVICE_READY_TIMEOUT
     while time.time() < deadline:
         if is_llm_up():
@@ -83,12 +118,13 @@ def owns_llm() -> bool:
 
 def stop_llm() -> None:
     """只关闭本模块拉起的进程；用户手动的实例不动。"""
-    global _owned_proc
+    global _owned_proc, _current_profile
     if _owned_proc is None:
         return
     subprocess.run(["taskkill", "/T", "/F", "/PID", str(_owned_proc.pid)],
                    capture_output=True)
     _owned_proc = None
+    _current_profile = None
     sse.hub.publish("log", text="已关闭代管的 llama-server")
 
 
@@ -150,6 +186,23 @@ def _parse_contract(text: str) -> dict:
             "tags": _normalize_tags(contract.get("tags"))}
 
 
+def _chat_with_retry(payload: dict) -> str:
+    """POST chat/completions，失败升温重试（t2i / multi / 命名共用）。"""
+    last_err: Exception | None = None
+    for attempt in range(config.CAPTION_RETRIES):
+        if attempt:
+            payload["temperature"] = config.CAPTION_RETRY_TEMPERATURE
+        try:
+            r = httpx.post(f"{config.LM_API_BASE}/v1/chat/completions",
+                           json=payload, timeout=600)
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"]
+        except Exception as e:  # noqa: BLE001 —— 重试后向外抛
+            last_err = e
+            sse.hub.publish("log", text=f"[caption] 第 {attempt + 1} 次失败：{e}")
+    raise RuntimeError(f"caption 重试耗尽：{last_err}")
+
+
 def caption_image(image_path: Path, note: str = "") -> dict:
     """单张图 → 契约 JSON（rewritten_prompt / wh_ratio / tags）。带注释时按
     "修正改写"语气追加。失败重试并升温。"""
@@ -161,7 +214,7 @@ def caption_image(image_path: Path, note: str = "") -> dict:
     if note:
         user_text += f"\n用户注释（务必体现在改写结果中）：{note}"
     payload = {
-        "model": config.LM_MODEL_ALIAS,
+        "model": _active_alias(),
         "messages": [
             {"role": "system", "content": read_skill_system_prompt()},
             {"role": "user", "content": [
@@ -172,27 +225,41 @@ def caption_image(image_path: Path, note: str = "") -> dict:
         "max_tokens": config.CAPTION_MAX_TOKENS,
         "temperature": config.CAPTION_TEMPERATURE,
     }
-    last_err: Exception | None = None
-    for attempt in range(config.CAPTION_RETRIES):
-        if attempt:
-            payload["temperature"] = config.CAPTION_RETRY_TEMPERATURE
-        try:
-            r = httpx.post(f"{config.LM_API_BASE}/v1/chat/completions",
-                           json=payload, timeout=600)
-            r.raise_for_status()
-            content = r.json()["choices"][0]["message"]["content"]
-            return _parse_contract(content)
-        except Exception as e:  # noqa: BLE001 —— 重试后向外抛
-            last_err = e
-            sse.hub.publish("log", text=f"[caption] 第 {attempt + 1} 次失败：{e}")
-    raise RuntimeError(f"caption 重试耗尽：{last_err}")
+    return _parse_contract(_chat_with_retry(payload))
+
+
+def caption_multi(image_paths: list[Path], template: str,
+                  note: str = "") -> dict:
+    """多图编辑类任务（asset/faceswap，§18.3）：模板 + 全部参考图一次调用，
+    产出具体化的编辑指令契约。image 顺序 = <image1>..<imageN>。"""
+    content = [{"type": "image_url", "image_url": {"url": _b64_image_url(p)}}
+               for p in image_paths]
+    user_text = (
+        "这是一组多图编辑任务的参考图，按发送顺序对应模板中的 <image1>、<image2>…。\n"
+        f"任务模板：\n{template}\n\n"
+        "请结合全部图片的实际内容，把模板具体化为最终可直接执行的英文编辑指令"
+        "（rewritten_prompt，保留 <image1> 等引用记号），wh_ratio 按第一张主图的比例，"
+        "并输出 tags（4~12 个英文小写短语标签）。")
+    if note:
+        user_text += f"\n用户注释（务必体现）：{note}"
+    content.append({"type": "text", "text": user_text})
+    payload = {
+        "model": _active_alias(),
+        "messages": [
+            {"role": "system", "content": read_skill_system_prompt()},
+            {"role": "user", "content": content},
+        ],
+        "max_tokens": config.CAPTION_MAX_TOKENS,
+        "temperature": config.CAPTION_TEMPERATURE,
+    }
+    return _parse_contract(_chat_with_retry(payload))
 
 
 # ---------- AI 任务命名（§16.4） ----------
 def generate_task_name(contract: dict) -> str:
     """首图契约 → 4-12 字任务名。任何失败返回空串（保留占位名，不抛出）。"""
     payload = {
-        "model": config.LM_MODEL_ALIAS,
+        "model": _active_alias(),
         "messages": [
             {"role": "system", "content":
                 "你是命名助手。根据生图提示词起一个4到12个字的中文短名，"

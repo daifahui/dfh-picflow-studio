@@ -8,7 +8,8 @@
 <script defer src="/static/alpine.min.js"></script>
 <script src="/static/app.js"></script>
 </head>
-<body x-data="studio()" x-init="init()" @ps-sse.window="onSse($event.detail)">
+<body x-data="studio()" x-init="init()" @ps-sse.window="onSse($event.detail)"
+      @keydown.escape.window="lightboxUrl = ''">
 
 <header>
   <h1>Prompt Studio</h1>
@@ -47,6 +48,23 @@
       <input id="import-file" type="file" accept=".zip,.7z">
     </div>
     <div class="row">
+      <label class="inline">任务类型
+        <select id="import-kind" x-model="imp.kind" @change="onKindChange()">
+          <option value="t2i">文生图（每图一张）</option>
+          <option value="asset">人物资产（多图一组）</option>
+          <option value="faceswap">换脸（多图一组）</option>
+        </select>
+      </label>
+    </div>
+    <div class="row" x-show="imp.kind !== 't2i'">
+      <input id="import-files" type="file" accept="image/*" multiple>
+      <span class="hint">多选参考图（≤6 张）</span>
+    </div>
+    <p class="hint" x-show="imp.kind !== 't2i'" x-text="kindHint()"></p>
+    <label x-show="imp.kind !== 't2i'">提示词模板（可编辑，&lt;imageN&gt; 按图片顺序引用）
+      <textarea id="imp-template" rows="4" x-model="imp.template"></textarea>
+    </label>
+    <div class="row">
       <input id="import-name" x-model="imp.name" placeholder="任务名（可留空：先占位，首图提取后 AI 自动命名）">
     </div>
     <div class="row">
@@ -65,6 +83,23 @@
       </div>
       <div class="row">
         <input id="imp-prompt-dir" x-model="imp.promptDir" placeholder="提示词输出目录（默认 图片输出目录/prompts）">
+      </div>
+      <div class="row">
+        <label class="inline">语言模型
+          <select id="imp-lm" x-model="imp.params.lm_profile">
+            <template x-for="p in modelOptions.lm" :key="p.key">
+              <option :value="p.key" x-text="p.label"></option>
+            </template>
+          </select>
+        </label>
+        <label class="inline">生图模型
+          <select id="imp-unet" x-model="imp.params.comfy_model">
+            <template x-for="u in modelOptions.unets" :key="u">
+              <option :value="u" x-text="u"></option>
+            </template>
+          </select>
+        </label>
+        <span class="hint" x-text="modelOptions.unet_source === 'live' ? 'ComfyUI 实时' : '目录扫描'"></span>
       </div>
       <div class="grid" id="params">
         <template x-for="f in paramFields" :key="f[0]">
@@ -111,7 +146,8 @@
                        @change="renameTask(t.id, $event.target.value)"
                        @keydown.enter="$event.target.blur()" :title="t.id"></td>
             <td class="dim cell-src" x-text="shortPath(t.source)"></td>
-            <td x-text="t.mode === 'review' ? '审阅' : '自动'"></td>
+            <td><span x-text="kindLabel(t.kind)"></span>
+              <span class="hint" x-text="t.mode === 'review' ? '审阅' : '自动'"></span></td>
             <td><span class="badge" :class="'st-' + t.phase"
                       x-text="phaseLabel(t.phase)"></span></td>
             <td class="cell-prog">
@@ -137,6 +173,7 @@
   <section class="card">
     <div class="row spread">
       <h2 id="phase-label">
+        <span class="badge st-reviewing" x-show="curKind() !== 't2i'" x-text="kindLabel(curKind())"></span>
         <span x-text="taskName()"></span> — <span x-text="phaseLabel(taskPhase())"></span>
       </h2>
       <div>
@@ -242,7 +279,8 @@
   <div class="row">
     <button id="btn-save" class="ghost" @click="saveDetail()">保存修改</button>
     <button id="btn-recaption" class="primary" @click="recaptionDetail()">带注释重新提取</button>
-    <button id="btn-gen-one" class="primary accent" @click="genOne()">生图此张</button>
+    <button id="btn-gen-one" class="primary accent" @click="genOne()"
+            x-text="isMulti() ? '生成资产图' : '生图此张'"></button>
   </div>
   <div id="detail-status" class="hint" x-text="detailStatus()"></div>
 </aside>

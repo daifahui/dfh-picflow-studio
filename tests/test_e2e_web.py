@@ -35,16 +35,22 @@ def server(tmp_path_factory):
         manager.workspace = ws_root
         manager._tasks.clear()
         manager._queue.clear()
-    mp.setattr(llm_caption, "ensure_llm", lambda: None)
+    mp.setattr(llm_caption, "ensure_llm", lambda profile=None: None)
     mp.setattr(llm_caption, "stop_llm", lambda: None)
     mp.setattr(llm_caption, "caption_image",
                lambda path, note="": {"rewritten_prompt": "a test prompt, anime style",
                                       "wh_ratio": "1:1", "tags": ["test", "anime"]})
+    mp.setattr(llm_caption, "caption_multi",
+               lambda paths, template, note="": {
+                   "rewritten_prompt": "edited multi prompt <image1> <image2>",
+                   "wh_ratio": "1:1", "tags": ["test", "multi"]})
     mp.setattr(llm_caption, "generate_task_name", lambda contract: "AI 名称")
     mp.setattr(comfy_client, "ensure_comfy", lambda: None)
     mp.setattr(comfy_client, "stop_comfy", lambda: None)
     mp.setattr(comfy_client, "generate_one",
                lambda contract, params, seed, prefix: make_png(32, 32))
+    mp.setattr(comfy_client, "generate_edit",
+               lambda paths, prompt, params, seed, prefix: make_png(32, 32))
 
     cfg = uvicorn.Config(main.app, host="127.0.0.1", port=PORT, log_level="warning")
     srv = uvicorn.Server(cfg)
@@ -77,9 +83,14 @@ def page(pw, server):
     yield pg
     ctx.close()
     from server.state import manager          # 服务器与测试同进程，直接重置任务态
-    manager.pause_flag = True                 # 先放掉可能卡在审阅闸的 worker
-    manager.resume_event.set()
-    time.sleep(0.3)
+    deadline = time.time() + 10               # 先确保前序 worker 真正退出（防信号量泄漏）
+    while time.time() < deadline:
+        if manager.worker_busy.acquire(blocking=False):
+            manager.worker_busy.release()
+            break
+        manager.pause_flag = True
+        manager.resume_event.set()
+        time.sleep(0.2)
     with manager.lock:
         manager._tasks.clear()
         manager._queue.clear()
@@ -89,12 +100,20 @@ def page(pw, server):
         manager.resume_event.clear()
 
 
-def import_and_start(page, image_dir, mode="auto", start=True, name="t"):
+def import_and_start(page, image_dir, mode="auto", start=True, name="t",
+                     kind="t2i"):
     page.goto(BASE)
+    page.wait_for_function(
+        "!!document.body._x_dataStack && document.body._x_dataStack.length > 0",
+        timeout=15000)                     # Alpine 初始化完成前点击无效（冷启动竞态）
     page.fill("#import-path", str(image_dir))
     if name:
         page.fill("#import-name", name)
     page.select_option("#import-mode", mode)
+    if kind != "t2i":
+        page.select_option("#import-kind", kind)
+        page.wait_for_function(
+            "document.querySelector('#imp-template').value !== ''")
     page.click("#btn-import-start" if start else "#btn-import")
 
 
@@ -124,12 +143,13 @@ def test_import_and_auto_queue_run(page, image_dir):
     import_and_start(page, image_dir, name="auto-run")
     page.wait_for_selector("#queue-table tbody tr", timeout=10000)
     page.wait_for_function(
-        "document.querySelector('#queue-table tbody').textContent.includes('完成')",
-        timeout=20000)
+        "document.querySelector('#queue-table tbody').textContent.includes('3/3 完成')",
+        timeout=20000)                                 # 全部完成（"0/3 完成"会提前命中）
 
     page.click('button:has-text("③ 结果")')
-    page.wait_for_selector("#result-grid .cell", timeout=10000)
-    assert page.locator("#result-grid .cell").count() == 3
+    page.wait_for_function(
+        "document.querySelectorAll('#result-grid .cell').length === 3",
+        timeout=10000)
 
 
 def test_import_review_then_gate_resume(page, image_dir):
@@ -221,6 +241,22 @@ def test_lightbox_opens_and_closes(page, image_dir):
     page.keyboard.press("Escape")
     page.wait_for_function(
         "!document.querySelector('#lightbox').classList.contains('open')")
+
+
+def test_multi_faceswap_run_renders_single_result(page, image_dir):
+    """§18.3：多图编辑类任务——模板自动填充、队列表类型徽标、结果页单产物。"""
+    import_and_start(page, image_dir, name="asset-run", kind="faceswap")
+    page.wait_for_function(
+        "document.querySelector('#queue-table tbody').textContent.includes('换脸')",
+        timeout=10000)
+    page.wait_for_function(
+        "document.querySelector('#queue-table tbody').textContent.includes('3/3 完成')",
+        timeout=20000)                                 # 全部完成才看结果
+
+    page.click('button:has-text("③ 结果")')
+    page.wait_for_function(
+        "document.querySelectorAll('#result-grid .cell').length === 1",
+        timeout=10000)                                 # multi 只有 1 张产物
 
 
 def test_sse_events_drive_queue_progress(page):

@@ -17,10 +17,12 @@ import time
 from pathlib import Path
 
 import uvicorn
-from fastapi import Body, FastAPI, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
+
+import httpx
 
 from . import comfy_client, config, input_ingest, llm_caption, sse
 from .state import Item, Task, manager, sanitize_name
@@ -78,6 +80,50 @@ async def upload(file: UploadFile) -> dict:
     return {"path": str(dest), "size": dest.stat().st_size}
 
 
+@app.post("/api/upload/batch")
+async def upload_batch(files: list[UploadFile] = File(...)) -> dict:
+    """多文件上传（多图编辑类任务用，§18.3）：落到暂存目录并当作文件夹源。"""
+    dest = config.UPLOAD_DIR / "batch" / _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    saved = 0
+    for f in files:
+        name = Path(f.filename or "").name
+        if not name or Path(name).suffix.lower() not in input_ingest.IMAGE_EXTS:
+            continue
+        dest.mkdir(parents=True, exist_ok=True)
+        with open(dest / name, "wb") as out:
+            while chunk := await f.read(1 << 20):
+                out.write(chunk)
+        saved += 1
+    if not saved:
+        raise HTTPException(400, "没有可用的图片文件")
+    return {"dir": str(dest), "count": saved}
+
+
+# ======================================================================
+# 模型选择（§18.2）
+# ======================================================================
+@app.get("/api/models")
+def models() -> dict:
+    """LLM 档位表 + 生图模型列表（ComfyUI 运行时取 live，否则静态扫描目录）。"""
+    unets, source = None, "static"
+    if comfy_client.is_comfy_up():
+        try:
+            info = httpx.get(f"{config.COMFY_API_BASE}/object_info/UNETLoader",
+                             timeout=5).json()
+            unets = [x["name"] for x in
+                     info["UNETLoader"]["input"]["required"]["unet_name"][0]]
+            source = "live"
+        except Exception:  # noqa: BLE001
+            pass
+    if unets is None:
+        unets = config.known_unets()
+    return {"lm": [{"key": k, "label": v["label"], "alias": v["alias"]}
+                   for k, v in config.LM_PROFILES.items()],
+            "unets": unets, "unet_source": source,
+            "templates": config.DEFAULT_TEMPLATES,
+            "multi_max": config.MULTI_MAX_IMAGES}
+
+
 # ======================================================================
 # 工作区与队列
 # ======================================================================
@@ -123,6 +169,13 @@ def import_queue_items(body: dict = Body(...)) -> dict:
         source = str(spec.get("source", "")).strip()
         if not source or not Path(source).exists():
             raise HTTPException(400, f"输入源不存在：{source}")
+        kind = str(spec.get("kind") or "t2i")
+        if kind not in ("t2i", "asset", "faceswap"):
+            raise HTTPException(400, f"任务类型非法：{kind}")
+        lm = str((spec.get("params") or {}).get("lm_profile")
+                 or config.DEFAULT_PARAMS["lm_profile"])
+        if lm not in config.LM_PROFILES:
+            raise HTTPException(400, f"语言模型档位非法：{lm}")
         for label, val in (("图片输出目录", spec.get("output_image_dir")),
                            ("提示词输出目录", spec.get("output_prompt_dir"))):
             val = str(val or "").strip()
@@ -136,9 +189,12 @@ def import_queue_items(body: dict = Body(...)) -> dict:
 
 def _create_task_entry(spec: dict) -> Task:
     source = str(spec.get("source", "")).strip()
+    kind = str(spec.get("kind") or "t2i")
     params = dict(config.DEFAULT_PARAMS)
     params.update({k: v for k, v in (spec.get("params") or {}).items()
                    if k in params})
+    if not str(params.get("prompt_template") or "").strip():
+        params["prompt_template"] = config.DEFAULT_TEMPLATES.get(kind, "")
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     name = sanitize_name(spec.get("name") or stamp) or stamp
     task_dir = manager._uniquify(manager.workspace / name)
@@ -167,13 +223,18 @@ def _create_task_entry(spec: dict) -> Task:
     else:
         raise HTTPException(400, f"输入源须为文件夹或 zip/7z 压缩包：{source}")
 
+    if kind in ("asset", "faceswap") and len(items) > config.MULTI_MAX_IMAGES:
+        raise HTTPException(
+            400, f"多图编辑类任务最多 {config.MULTI_MAX_IMAGES} 张参考图"
+                 f"（收到 {len(items)} 张，类型 {kind}）")
+
     t = manager.create_task(
         name=task_dir.name, source_desc=str(src), source_root=Path(source_root),
         params=params, items=items, task_dir=task_dir,
         output_image_dir=img_out, output_prompt_dir=prompt_out,
         mode=str(spec.get("mode") or "auto"),
-        ai_name=bool(spec.get("ai_name", True)))
-    sse.hub.publish("log", text=f"任务导入：{t.name}（{len(items)} 张，{t.mode}）")
+        ai_name=bool(spec.get("ai_name", True)), kind=kind)
+    sse.hub.publish("log", text=f"任务导入：{t.name}（{len(items)} 张，{kind}/{t.mode}）")
     return t
 
 
@@ -271,7 +332,9 @@ def _set_seed(t: Task, it: Item, batch: bool) -> int:
 
 # ---------- 条目级共用循环（调用方保证服务已就绪） ----------
 def _caption_items(t: Task, seqs: list[int] | None) -> None:
-    """阶段一循环：逐张契约提取；首张成功后按需 AI 命名。"""
+    if t.is_multi:
+        _caption_multi(t)
+        return
     targets = [it for it in t.items if not seqs or it.seq in seqs]
     named = False
     for i, it in enumerate(targets, 1):
@@ -300,6 +363,44 @@ def _caption_items(t: Task, seqs: list[int] | None) -> None:
             _pub_item(t, it)
 
 
+def _caption_multi(t: Task) -> None:
+    """多图编辑类：全部图一次 LLM 调用，同一契约写入全部条目（§18.3）。"""
+    targets = list(t.items)
+    template = str(t.params.get("prompt_template") or ""
+                   ) or config.DEFAULT_TEMPLATES.get(t.kind, "")
+    for it in targets:
+        if manager.pause_flag or t.cancel_flag:
+            return
+        manager.set_status(t, it, "captioning")
+    sse.hub.publish("progress", task_id=t.id, task_name=t.name,
+                    phase="captioning", seq=targets[0].seq, done=0,
+                    total=1, filename=f"{len(targets)} 张参考图")
+    t0 = time.time()
+    try:
+        contract = llm_caption.caption_multi(
+            [Path(it.src_path) for it in targets], template)
+    except Exception as e:  # noqa: BLE001
+        for it in targets:
+            manager.set_status(t, it, "caption_failed", str(e)[:300])
+            _pub_item(t, it)
+        return
+    ms = int((time.time() - t0) * 1000)
+    for i, it in enumerate(targets):
+        with manager.lock:
+            it.contract = dict(contract)
+            it.caption_ms = ms
+        if i == 0:
+            _append_summary(t, it)                    # 汇总只记一行
+        _write_tags_sidecar(t, it)
+        (t.prompts_dir / f"{it.seq:04d}.json").write_text(
+            json.dumps({"file": it.src_filename, **it.contract},
+                       ensure_ascii=False, indent=1), encoding="utf-8")
+        manager.set_status(t, it, "captioned")
+        _pub_item(t, it)
+    if t.ai_name and not t.renamed:
+        _maybe_ai_rename(t, contract)
+
+
 def _maybe_ai_rename(t: Task, contract: dict) -> None:
     new_name = llm_caption.generate_task_name(contract)
     if new_name and manager.rename_task(t, new_name, by_user=False):
@@ -308,7 +409,9 @@ def _maybe_ai_rename(t: Task, contract: dict) -> None:
 
 
 def _generate_items(t: Task, seqs: list[int] | None) -> None:
-    """阶段二循环：逐张提交 ComfyUI 并收图。"""
+    if t.is_multi:
+        _generate_multi(t)
+        return
     targets = [it for it in t.items if it.contract and
                (not seqs or it.seq in seqs)]
     batch = not seqs and len(targets) > 1
@@ -336,6 +439,45 @@ def _generate_items(t: Task, seqs: list[int] | None) -> None:
             manager.set_status(t, it, "done")
             _pub_item(t, it)
         except Exception as e:  # noqa: BLE001
+            manager.set_status(t, it, "generate_failed", str(e)[:300])
+            _pub_item(t, it)
+
+
+def _generate_multi(t: Task) -> None:
+    """多图编辑类：整组一次生成，产物挂到 seq=1 条目（§18.3）。"""
+    targets = list(t.items)
+    if not targets or not targets[0].contract:
+        for it in targets:
+            manager.set_status(t, it, "generate_failed", "缺少契约提示词")
+            _pub_item(t, it)
+        return
+    for it in targets:
+        manager.set_status(t, it, "generating")
+        _pub_item(t, it)
+    sse.hub.publish("progress", task_id=t.id, task_name=t.name,
+                    phase="generating", seq=targets[0].seq, done=0,
+                    total=1, filename=f"编辑生成（{len(targets)} 张参考）")
+    t0 = time.time()
+    try:
+        prompt = targets[0].contract["rewritten_prompt"]
+        paths = [Path(it.src_path) for it in targets]
+        seed = _set_seed(t, targets[0], batch=False)
+        png = comfy_client.generate_edit(paths, prompt, t.params, seed,
+                                         prefix=f"{targets[0].seq:04d}")
+        out_dir = t.images_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_name = f"{Path(targets[0].src_filename).stem}_asset.png"
+        (out_dir / out_name).write_bytes(png)
+        ms = int((time.time() - t0) * 1000)
+        for i, it in enumerate(targets):
+            with manager.lock:
+                if i == 0:
+                    it.out_image = out_name
+                it.generate_ms = ms
+            manager.set_status(t, it, "done")
+            _pub_item(t, it)
+    except Exception as e:  # noqa: BLE001
+        for it in targets:
             manager.set_status(t, it, "generate_failed", str(e)[:300])
             _pub_item(t, it)
 
@@ -384,7 +526,6 @@ def _queue_worker() -> None:
 
 
 def _queue_stage_caption() -> None:
-    llm_ready = False
     for t in manager.all_tasks():
         if manager.pause_flag:
             break
@@ -396,9 +537,12 @@ def _queue_stage_caption() -> None:
             continue
         t.cancel_flag = False
         _set_task_phase(t, "captioning")
-        if not llm_ready:
-            llm_caption.ensure_llm()
-            llm_ready = True
+        try:
+            llm_caption.ensure_llm(t.params.get("lm_profile"))   # 档位按任务，自动换档
+        except Exception as e:  # noqa: BLE001 —— 服务起不来：该任务停止，继续后续任务
+            sse.hub.publish("log", text=f"[error] {t.name}: {e}")
+            _set_task_phase(t, "stopped")
+            continue
         _caption_items(t, None)
         _set_task_phase(t, "stopped" if t.cancel_flag else "reviewing")
     if llm_caption.owns_llm():
@@ -454,7 +598,7 @@ def _single_op(kind: str, t: Task, seqs: list[int] | None) -> None:
             t.cancel_flag = False
             if kind == "caption":
                 _set_task_phase(t, "captioning")
-                llm_caption.ensure_llm()
+                llm_caption.ensure_llm(t.params.get("lm_profile"))
                 _caption_items(t, seqs)
                 _set_task_phase(t, "stopped" if t.cancel_flag else "reviewing")
             else:
@@ -562,9 +706,20 @@ def update_item(tid: str, seq: int, body: dict = Body(...)) -> dict:
         if it.status == "caption_failed":
             manager.set_status(t, it, "pending")
     manager.save_task(t)
-    if "tags" in body and it.contract:
-        _write_tags_sidecar(t, it)                    # 标签编辑同步重写 sidecar（§17.3）
+    if it.contract and ("rewritten_prompt" in body or "wh_ratio" in body
+                        or "tags" in body):
+        if t.is_multi:                                # 多图编辑类：契约广播到全部条目
+            for other in t.items:
+                with manager.lock:
+                    other.contract = dict(it.contract)
+                _write_tags_sidecar(t, other)
+        else:
+            _write_tags_sidecar(t, it)                # 标签编辑同步重写 sidecar（§17.3）
     _pub_item(t, it)
+    if t.is_multi:
+        for other in t.items:
+            if other.seq != it.seq:
+                _pub_item(t, other)
     return {"ok": True}
 
 

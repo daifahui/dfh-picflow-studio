@@ -11,8 +11,10 @@ function studio() {
     sel: "",                              // 审阅/详情当前任务
     resultFilter: "all",
     progress: {},                         // task_id -> {done,total,filename,phase}
-    imp: { path: "", name: "", mode: "auto", aiName: true,
-           imgDir: "", promptDir: "", params: {} },
+    imp: { path: "", name: "", mode: "auto", aiName: true, kind: "t2i",
+           template: "", imgDir: "", promptDir: "", params: {} },
+    modelOptions: { lm: [], unets: [], unet_source: "static",
+                    templates: {}, multi_max: 6 },
     paramFields: [
       ["steps", "步数", "number"], ["sampler", "采样器", "text"],
       ["scheduler", "调度器", "text"], ["cfg", "cfg", "number"],
@@ -29,25 +31,31 @@ function studio() {
 
     /* ---------- 初始化 ---------- */
     async init() {
-      try {
-        const d = await this.api("/api/defaults");
-        this.imp.params = { ...d };
-        const ws = await this.api("/api/workspace");
-        this.applyWs(ws);
-      } catch (e) { this.addLog("[warn] 初始化失败：" + e.message); }
-      this.pollHealth();
-      setInterval(() => this.pollHealth(), 5000);
+      // 闭包/定时器/原生监听里改组件状态必须走 $data 代理，否则不触发渲染
+      const P = window.Alpine.$data(document.body);
+      // SSE 必须最先连接：init 里其余请求（/api/models 探测 ComfyUI 等）有耗时，
+      // 晚创建会错过任务事件的爆发期
       const es = new EventSource("/api/task/events");
+      this._es = es;                       // 调试与生命周期管理用
       es.onmessage = (ev) => {
         try {
           // 外部回调 → CustomEvent 桥接，保证在 Alpine 响应式作用域内求值
           window.dispatchEvent(new CustomEvent("ps-sse", { detail: JSON.parse(ev.data) }));
         } catch { /* 非 JSON 心跳等 */ }
       };
-      es.onerror = () => this.addLog("[warn] SSE 断线，3s 后自动重连");
-      window.addEventListener("keydown", (e) => {
-        if (e.key === "Escape") { this.lightboxUrl = ""; }
-      });
+      es.onerror = () => P.addLog("[warn] SSE 断线，3s 后自动重连");
+      try {
+        const d = await this.api("/api/defaults");
+        P.imp.params = { ...d };
+        P.modelOptions = await this.api("/api/models");
+        if (P.imp.kind !== "t2i" && !P.imp.template) P.onKindChange();
+        const ws = await this.api("/api/workspace");
+        P.applyWs(ws);
+      } catch (e) { P.addLog("[warn] 初始化失败：" + e.message); }
+      P.pollHealth();
+      setInterval(() => P.pollHealth(), 5000);
+      // Esc 关闭 lightbox 由 body 上的 @keydown.escape.window 指令处理（在
+      // Alpine 作用域内求值；原生监听闭包里的赋值不触发渲染，勿改回）
     },
 
     onSse(d) { this.onEvent(d); },
@@ -96,7 +104,8 @@ function studio() {
 
     /* ---------- 健康轮询 ---------- */
     async pollHealth() {
-      try { this.health = await this.api("/api/health"); }
+      const P = window.Alpine.$data(document.body);
+      try { P.health = await P.api("/api/health"); }
       catch { /* 服务未连接 */ }
     },
 
@@ -137,14 +146,15 @@ function studio() {
       try { this.applyWs(await this.api("/api/workspace")); } catch { /* 忽略 */ }
     },
     typewrite(text) {
-      this.typed = "";
-      clearInterval(this._twTimer);
+      const P = window.Alpine.$data(document.body);
+      P.typed = "";
+      clearInterval(P._twTimer);
       let i = 0;
       const step = Math.max(1, Math.round(text.length / 120));
-      this._twTimer = setInterval(() => {
+      P._twTimer = setInterval(() => {
         i = Math.min(text.length, i + step);
-        this.typed = text.slice(0, i);
-        if (i >= text.length) clearInterval(this._twTimer);
+        P.typed = text.slice(0, i);
+        if (i >= text.length) clearInterval(P._twTimer);
       }, 40);
     },
 
@@ -165,29 +175,54 @@ function studio() {
       const r = await this.post("/api/browse/dir");
       if (r.path) this.imp.path = r.path;
     },
+    onKindChange() {
+      this.imp.template = this.modelOptions.templates[this.imp.kind] || "";
+    },
+    kindLabel(k) {
+      return { t2i: "文生图", asset: "人物资产", faceswap: "换脸" }[k] || k || "";
+    },
+    kindHint() {
+      return this.imp.kind === "asset"
+        ? "图片顺序即角色：<image1>=人物，<image2>=服装，<image3+>=风格/姿势参考（≤6 张）"
+        : "图片顺序即角色：<image1>=主图，<image2+>=目标人脸（多脸可提升还原度，≤6 张）";
+    },
+    isMulti() { return this.curKind() !== "t2i"; },
+    curKind() {
+      const t = this.ws.queue.find((x) => x.id === this.sel);
+      return t ? t.kind : "t2i";
+    },
     async importTask(start) {
       try {
         let source = this.imp.path.trim();
         const fileEl = document.querySelector("#import-file").files[0];
-        if (fileEl) {
+        const multiEl = document.querySelector("#import-files");
+        if (this.imp.kind !== "t2i" && multiEl && multiEl.files.length) {
+          const fd = new FormData();
+          for (const f of multiEl.files) fd.append("files", f);
+          const up = await this.api("/api/upload/batch", { method: "POST", body: fd });
+          source = up.dir;
+        } else if (fileEl) {
           const fd = new FormData();
           fd.append("file", fileEl);
           const up = await this.api("/api/upload", { method: "POST", body: fd });
           source = up.path;
         }
-        if (!source) throw new Error("请填写路径或上传压缩包");
+        if (!source) throw new Error("请填写路径或上传文件");
+        const params = { ...this.imp.params };
+        if (this.imp.kind !== "t2i") params.prompt_template = this.imp.template;
         const st = await this.post("/api/queue/items", { items: [{
           source, name: this.imp.name.trim(), mode: this.imp.mode,
-          ai_name: this.imp.aiName,
+          ai_name: this.imp.aiName, kind: this.imp.kind,
           output_image_dir: this.imp.imgDir.trim(),
           output_prompt_dir: this.imp.promptDir.trim(),
-          params: this.imp.params,
+          params,
         }] });
         this.applyWs(st);
         this.addLog("已加入队列：" + st.created[0].name);
         this.imp.path = ""; this.imp.name = "";
         this.imp.imgDir = ""; this.imp.promptDir = "";
         document.querySelector("#import-file").value = "";
+        if (multiEl) multiEl.value = "";
         if (start) await this.queueStart();
         this.show("queue");
       } catch (e) { alert(e.message); }
@@ -306,9 +341,9 @@ function studio() {
 
     /* ---------- 结果页 ---------- */
     ensureResultItems() {
+      // 不依赖可能过期的 ws 状态：队列里所有未缓存任务都拉一份条目
       for (const t of this.ws.queue) {
-        const ok = t.phase === "done" || t.counts.done > 0;
-        if (ok && !this.itemsCache[t.id]) this.refreshTaskItems(t.id);
+        if (!this.itemsCache[t.id]) this.refreshTaskItems(t.id);
       }
     },
     doneItems() {
@@ -317,7 +352,7 @@ function studio() {
       for (const t of this.ws.queue) {
         if (this.resultFilter !== "all" && this.resultFilter !== t.id) continue;
         for (const it of this.itemsCache[t.id] || []) {
-          if (it.status === "done") rows.push({ tid: t.id, it });
+          if (it.status === "done" && it.out_image) rows.push({ tid: t.id, it });
         }
       }
       return rows;

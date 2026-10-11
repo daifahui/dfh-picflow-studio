@@ -160,6 +160,29 @@ def test_caption_image_appends_note():
     img.unlink()
 
 
+# ---------- 多图编辑 caption（§18.3） ----------
+@respx.mock
+def test_caption_multi_sends_all_images_and_template():
+    route = respx.post(f"{BASE}/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=_chat(
+            '{"rewritten_prompt": "put <image2> on <image1>", "wh_ratio": "3:4",'
+            ' "tags": ["swap"]}')))
+    paths = []
+    for i in (1, 2, 3):
+        p = Path(__file__).parent / f"multi_{i}.png"
+        p.write_bytes(b"\x89PNG")
+        paths.append(p)
+    c = llm_caption.caption_multi(paths, "把 <image2> 放到 <image1> 上", note="保持姿势")
+    assert c["rewritten_prompt"] == "put <image2> on <image1>"
+    assert c["wh_ratio"] == "3:4"
+    body = route.calls.last.request.read().decode()
+    assert body.count("data:image/png;base64") == 3      # 三张图全部内联
+    assert "把 &lt;image2&gt; 放到" in body or "把 <image2> 放到" in body
+    assert "保持姿势" in body
+    for p in paths:
+        p.unlink()
+
+
 # ---------- AI 任务命名（§16.4） ----------
 @respx.mock
 def test_generate_task_name_strips_think_and_cleans():

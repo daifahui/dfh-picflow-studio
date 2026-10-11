@@ -120,7 +120,7 @@ def test_queue_batched_pipeline_order(client, image_dir, stub_external, monkeypa
     from server import comfy_client, llm_caption
     calls = []
 
-    def fake_ensure_llm():
+    def fake_ensure_llm(profile=None):
         llm_caption._owned_proc = object()      # 模拟真实 ensure 登记代管进程
         calls.append("llm_up")
 
@@ -146,13 +146,15 @@ def test_queue_batched_pipeline_order(client, image_dir, stub_external, monkeypa
     wait_task_phase(client, t2, "done")
 
     assert calls[0] == "llm_up"
-    assert calls.count("llm_up") == 1 and calls.count("llm_down") == 1
+    # ensure_llm 按任务调用（§18.2 档位按任务）：两次 ensure、一次统一释放
+    assert calls.count("llm_up") == 2 and calls.count("llm_down") == 1
     assert calls.index("llm_down") < calls.index("comfy_up")   # 显存先换后进
     assert calls.count("comfy_up") == 1 and calls.count("comfy_down") == 1
     assert calls.count("cap") == 6 and calls.count("gen") == 6
     assert calls.index("comfy_down") == len(calls) - 1
-    # 服务各只起一次的关键断言
-    assert calls[:8] == ["llm_up"] + ["cap"] * 6 + ["llm_down"]
+    # 服务各只起一次的关键断言（同档位复用实例，不重复启动真实服务）
+    assert calls[:9] == ["llm_up"] + ["cap"] * 3 + \
+        ["llm_up"] + ["cap"] * 3 + ["llm_down"]
     assert t1 and t2
 
 
@@ -201,6 +203,7 @@ def test_queue_stop_marks_tasks_stopped(client, image_dir, stub_external):
     client.post("/api/queue/stop")                       # 未启动也可预挂取消
     client.post("/api/queue/start")
     wait_task_phase(client, tid, "stopped")
+    wait_ws(client, lambda ws: ws["running"] is False)   # worker 收尾也要等
     ws = client.get("/api/workspace").json()
     assert ws["running"] is False
 
@@ -362,6 +365,110 @@ def test_tags_sidecar_written_and_edited(client, image_dir, stub_external):
     assert it["contract"]["tags"] == ["silver hair", "night", "city"]
     assert (pdir / "tags" / "0001.txt").read_text(
         encoding="utf-8") == "silver hair, night, city"
+
+
+# ---------- 模型选择（§18.2） ----------
+def test_models_endpoint_static(client, monkeypatch):
+    from server import comfy_client
+    monkeypatch.setattr(comfy_client, "is_comfy_up", lambda: False)
+    d = client.get("/api/models").json()
+    assert [p["key"] for p in d["lm"]] == ["iq2_m_64k", "q4_k_m"]
+    assert d["unet_source"] == "static"
+    assert any("UC-int8_convrot" in u for u in d["unets"])
+    assert d["multi_max"] == 6
+    assert "asset" in d["templates"] and "faceswap" in d["templates"]
+
+
+def test_import_rejects_bad_lm_profile(client, image_dir):
+    r = client.post("/api/queue/items", json={"items": [
+        {"source": str(image_dir), "params": {"lm_profile": "bogus"}}]})
+    assert r.status_code == 400
+
+
+def test_single_caption_uses_task_profile(client, image_dir, stub_external,
+                                          monkeypatch):
+    from server import llm_caption
+    seen = []
+    monkeypatch.setattr(llm_caption, "ensure_llm",
+                        lambda profile=None: seen.append(profile))
+    tid = import_task(client, image_dir, name="prof",
+                      params={"lm_profile": "q4_k_m"})
+    client.post(f"/api/tasks/{tid}/caption")
+    wait_task_phase(client, tid, "reviewing")
+    assert seen == ["q4_k_m"]
+
+
+def test_upload_batch(client):
+    png = make_png(8, 8)
+    r = client.post("/api/upload/batch", files=[
+        ("files", ("a.png", png, "image/png")),
+        ("files", ("b.jpg", png, "image/jpeg")),
+        ("files", ("junk.txt", b"text", "text/plain")),     # 非图片被忽略
+    ])
+    assert r.status_code == 200
+    d = r.json()
+    assert d["count"] == 2
+    from server import input_ingest
+    assert len(input_ingest.scan_dir(pathlib.Path(d["dir"]))) == 2
+
+
+# ---------- 多图编辑类（asset/faceswap，§18.3） ----------
+def test_import_rejects_bad_kind(client, image_dir):
+    r = client.post("/api/queue/items", json={"items": [
+        {"source": str(image_dir), "kind": "x"}]})
+    assert r.status_code == 400
+
+
+def test_import_multi_over_limit(client, image_dir, tmp_path):
+    many = tmp_path / "many"
+    many.mkdir()
+    for i in range(7):                                       # 上限 6
+        (many / f"{i}.png").write_bytes(make_png(4, 4))
+    r = client.post("/api/queue/items", json={"items": [
+        {"source": str(many), "kind": "faceswap"}]})
+    assert r.status_code == 400
+    assert "6" in r.json()["detail"]
+
+
+def test_multi_pipeline_one_call_one_output(client, image_dir, stub_external,
+                                            monkeypatch):
+    """asset 任务：一次 LLM 调用（3 图）、一次编辑生成、单产物挂 seq1。"""
+    from server import comfy_client, llm_caption
+    calls = []
+    monkeypatch.setattr(llm_caption, "caption_multi",
+                        lambda paths, template, note="":
+                        calls.append(f"cap{len(paths)}") or dict(FAKE_CONTRACT))
+    monkeypatch.setattr(comfy_client, "generate_edit",
+                        lambda paths, prompt, params, seed, prefix:
+                        calls.append(f"gen{len(paths)}:{prefix}") or make_png(8, 8))
+
+    tid = import_task(client, image_dir, name="m", kind="asset")
+    ws = client.get("/api/workspace").json()
+    assert ws["queue"][0]["kind"] == "asset"
+    client.post("/api/queue/start")
+    wait_task_phase(client, tid, "done", timeout=15)
+
+    d = client.get(f"/api/tasks/{tid}").json()
+    items = d["items"]
+    assert all(i["status"] == "done" for i in items)
+    assert [i["out_image"] for i in items].count("") == 2    # 仅 seq1 有产物
+    assert calls == ["cap3", "gen3:0001"]
+    asset = pathlib.Path(d["task"]["images_dir"]) / items[0]["out_image"]
+    assert asset.exists()
+    sidecar = pathlib.Path(d["task"]["prompts_dir"]) / "tags" / "0002.txt"
+    assert sidecar.read_text(encoding="utf-8") == "test, anime"
+
+
+def test_multi_prompt_edit_broadcasts(client, image_dir, stub_external):
+    """multi 任务改契约 → 广播到全部条目。"""
+    tid = import_task(client, image_dir, name="mb", kind="faceswap")
+    client.post(f"/api/tasks/{tid}/caption")
+    wait_task_phase(client, tid, "reviewing")
+    client.put(f"/api/tasks/{tid}/items/2",
+               json={"rewritten_prompt": "new swap prompt"})
+    items = client.get(f"/api/tasks/{tid}").json()["items"]
+    assert all(i["contract"]["rewritten_prompt"] == "new swap prompt"
+               for i in items)
 
 
 # ---------- 图片服务与安全边界 ----------

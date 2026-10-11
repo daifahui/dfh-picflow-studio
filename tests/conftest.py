@@ -70,16 +70,20 @@ def zip_archive(tmp_path: Path, image_dir: Path) -> Path:
 @pytest.fixture()
 def stub_external(monkeypatch):
     """桩掉两个模型服务与 AI 命名的全部触点。"""
-    monkeypatch.setattr(llm_caption, "ensure_llm", lambda: None)
+    monkeypatch.setattr(llm_caption, "ensure_llm", lambda profile=None: None)
     monkeypatch.setattr(llm_caption, "stop_llm", lambda: None)
     monkeypatch.setattr(llm_caption, "caption_image",
                         lambda path, note="": dict(FAKE_CONTRACT))
+    monkeypatch.setattr(llm_caption, "caption_multi",
+                        lambda paths, template, note="": dict(FAKE_CONTRACT))
     monkeypatch.setattr(llm_caption, "generate_task_name",
                         lambda contract: "AI 名称")
     monkeypatch.setattr(comfy_client, "ensure_comfy", lambda: None)
     monkeypatch.setattr(comfy_client, "stop_comfy", lambda: None)
     monkeypatch.setattr(comfy_client, "generate_one",
                         lambda contract, params, seed, prefix: make_png(32, 32))
+    monkeypatch.setattr(comfy_client, "generate_edit",
+                        lambda paths, prompt, params, seed, prefix: make_png(32, 32))
     return FAKE_CONTRACT
 
 

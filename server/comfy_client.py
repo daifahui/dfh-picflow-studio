@@ -23,7 +23,9 @@ _RATIO = re.compile(r"^\s*(\d+)\s*:\s*(\d+)\s*$")
 # ---------- 生命周期 ----------
 def is_comfy_up() -> bool:
     try:
-        return httpx.get(f"{config.COMFY_API_BASE}/system_stats", timeout=3).status_code == 200
+        # 本机对关闭端口要 ~2s 才连接失败（防火墙 DROP），超时必须远小于它
+        return httpx.get(f"{config.COMFY_API_BASE}/system_stats",
+                         timeout=0.5).status_code == 200
     except Exception:  # noqa: BLE001 —— 未启动时连接被拒，属正常态
         return False
 
@@ -107,6 +109,71 @@ def generate_one(contract: dict, params: dict, seed: int, prefix: str) -> bytes:
     """提交一张并等待完成，返回 PNG 字节。"""
     params = dict(params, seed=seed)
     graph = build_graph(contract, params, prefix)
+    return _submit_and_fetch(graph)
+
+
+# ---------- 多图编辑类（asset / faceswap，§18.3） ----------
+def upload_to_comfy(path: Path) -> str:
+    """参考图传入 ComfyUI input 目录，返回可被 LoadImage 引用的文件名。"""
+    data = path.read_bytes()
+    name = f"ps_{path.stem}{path.suffix.lower()}"
+    r = httpx.post(f"{config.COMFY_API_BASE}/upload/image",
+                   files={"image": (name, data)},
+                   data={"overwrite": "true"}, timeout=120)
+    r.raise_for_status()
+    return r.json()["name"]
+
+
+def _unet_loader(model: str) -> tuple[str, dict]:
+    """safetensors 走官方 UNETLoader；gguf 走 ComfyUI-GGUF 的 UnetLoaderGGUF。"""
+    if model.lower().endswith(".gguf"):
+        return "UnetLoaderGGUF", {"unet_name": model, "weight_dtype": "default"}
+    return "UNETLoader", {"unet_name": model, "weight_dtype": "default"}
+
+
+def build_edit_graph(prompt: str, image_names: list[str],
+                     params: dict, seed: int) -> dict:
+    """多图编辑 API 图（§18.1 探明的官方模板结构）：
+    参考图经 TextEncodeQwenImage21 编码并直接输出参考 latent（尺寸跟随参考图）。"""
+    loader_cls, loader_inputs = _unet_loader(params["comfy_model"])
+    graph = {
+        "1": {"class_type": loader_cls, "inputs": loader_inputs},
+        "2": {"class_type": "CLIPLoader", "inputs": {
+            "clip_name": params["clip_model"], "type": "qwen_image", "device": "default"}},
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": params["vae_model"]}},
+        "4": {"class_type": "QwenImage21Cache", "inputs": {
+            "model": ["1", 0], "device": "auto", "dtype": "default"}},
+        "5": {"class_type": "TextEncodeQwenImage21", "inputs": {
+            "clip": ["2", 0], "vae": ["3", 0], "prompt": prompt,
+            "negative_prompt": "", "resolution": params["te_resolution"]}},
+        "6": {"class_type": "KSampler", "inputs": {
+            "model": ["4", 0], "positive": ["5", 0], "negative": ["5", 1],
+            "latent_image": ["5", 2], "seed": int(seed),
+            "steps": params["steps"], "cfg": params["cfg"],
+            "sampler_name": params["sampler"], "scheduler": params["scheduler"],
+            "denoise": 1}},
+        "7": {"class_type": "VAEDecode", "inputs": {
+            "samples": ["6", 0], "vae": ["3", 0]}},
+        "8": {"class_type": "SaveImage", "inputs": {
+            "images": ["7", 0], "filename_prefix": "edit"}},
+    }
+    for i, name in enumerate(image_names, 1):
+        graph[f"10{i}"] = {"class_type": "LoadImage", "inputs": {
+            "image": name, "upload": "image"}}
+        graph["5"]["inputs"][f"images.image_{i}"] = [f"10{i}", 0]
+    return graph
+
+
+def generate_edit(image_paths: list[Path], prompt: str,
+                  params: dict, seed: int, prefix: str) -> bytes:
+    """多图编辑：上传参考图 → 提交编辑图 → 等待收图。"""
+    names = [upload_to_comfy(p) for p in image_paths]
+    graph = build_edit_graph(prompt, names, dict(params), seed)
+    graph["8"]["inputs"]["filename_prefix"] = prefix
+    return _submit_and_fetch(graph)
+
+
+def _submit_and_fetch(graph: dict) -> bytes:
     r = httpx.post(f"{config.COMFY_API_BASE}/prompt",
                    json={"prompt": graph, "client_id": "prompt-studio"}, timeout=60)
     r.raise_for_status()

@@ -1,5 +1,6 @@
 """comfy_client 单元测试：wh_ratio 换算、API 图构建、generate_one 流程（respx mock）。"""
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -93,3 +94,53 @@ def test_generate_one_raises_on_queue_reject():
     with pytest.raises(RuntimeError, match="入队被拒"):
         comfy_client.generate_one({"rewritten_prompt": "x", "wh_ratio": "1:1"},
                                   dict(config.DEFAULT_PARAMS), 1, "p")
+
+
+# ---------- 多图编辑图（§18.3） ----------
+def test_build_edit_graph_structure():
+    params = dict(config.DEFAULT_PARAMS)
+    g = comfy_client.build_edit_graph("put <image2> on <image1>",
+                                      ["a.png", "b.png", "c.png"], params, 42)
+    # LoadImage × 3 + 8 主干节点
+    assert set(g) == {"1", "2", "3", "4", "5", "6", "7", "8",
+                      "101", "102", "103"}
+    assert g["101"]["class_type"] == "LoadImage"
+    assert g["101"]["inputs"]["image"] == "a.png"
+    enc = g["5"]["inputs"]
+    assert enc["prompt"] == "put <image2> on <image1>"
+    for i in (1, 2, 3):
+        assert enc[f"images.image_{i}"] == [f"10{i}", 0]
+    assert "images.image_4" not in enc                     # 未提供的参考不出现在图里
+    ks = g["6"]["inputs"]
+    assert ks["latent_image"] == ["5", 2]                  # 参考 latent 直连（edit 路径）
+    assert ks["model"] == ["4", 0] and ks["positive"] == ["5", 0]
+    assert g["4"]["class_type"] == "QwenImage21Cache"
+    assert g["1"]["class_type"] == "UNETLoader"            # safetensors → 官方 loader
+
+
+def test_build_edit_graph_gguf_uses_gguf_loader():
+    params = dict(config.DEFAULT_PARAMS, comfy_model="qwen-image-2.1-UC-Q8_0.gguf")
+    g = comfy_client.build_edit_graph("p", ["a.png"], params, 1)
+    assert g["1"]["class_type"] == "UnetLoaderGGUF"
+    assert g["1"]["inputs"]["unet_name"] == "qwen-image-2.1-UC-Q8_0.gguf"
+
+
+@respx.mock
+def test_generate_edit_uploads_references(tmp_path):
+    src = tmp_path / "a.png"
+    src.write_bytes(b"fake image bytes")
+    up = respx.post(f"{BASE}/upload/image").mock(return_value=httpx.Response(
+        200, json={"name": "ps_a.png", "subfolder": "", "type": "input"}))
+    respx.post(f"{BASE}/prompt").mock(return_value=httpx.Response(
+        200, json={"prompt_id": "pe1"}))
+    respx.get(f"{BASE}/history/pe1").mock(return_value=httpx.Response(200, json={
+        "pe1": {"status": {"status_str": "success"},
+                "outputs": {"8": {"images": [
+                    {"filename": "e.png", "subfolder": "", "type": "output"}]}}}}))
+    respx.get(f"{BASE}/view").mock(return_value=httpx.Response(200, content=b"PNG"))
+    out = comfy_client.generate_edit([src], "p", dict(config.DEFAULT_PARAMS), 1, "0001")
+    assert out == b"PNG"
+    assert up.call_count == 1
+    import json as _json
+    sent = _json.loads(respx.post(f"{BASE}/prompt").calls.last.request.read())
+    assert sent["prompt"]["101"]["inputs"]["image"] == "ps_a.png"
