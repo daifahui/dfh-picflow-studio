@@ -341,15 +341,17 @@ class WorkspaceManager:
             return bool(self._tasks)
 
     def switch_workspace(self, path: Path) -> None:
-        """切换工作区（仅在 worker 空闲时由 API 调用）。"""
+        """切换工作区（仅在 worker 空闲时由 API 调用）。
+        必须先写指针再 load：load() 会按指针文件覆盖 self.workspace，
+        顺序颠倒会把刚切到的新工作区又覆盖回旧值（2026-10-11 实测踩坑）。"""
+        config.WORKSPACE_POINTER.write_text(
+            json.dumps({"workspace": str(path)}, ensure_ascii=False), encoding="utf-8")
         with self._lock:
             self.workspace = path
             self.running = False
             self.gate = False
             self.pause_flag = False
         self.load()
-        config.WORKSPACE_POINTER.write_text(
-            json.dumps({"workspace": str(path)}, ensure_ascii=False), encoding="utf-8")
 
 
 def _dirkey(p: Path) -> str:

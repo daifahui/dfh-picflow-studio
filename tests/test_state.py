@@ -113,6 +113,20 @@ def test_load_empty_workspace(ws: Path):
     assert manager.load() is False
 
 
+def test_switch_workspace_overrides_stale_pointer(ws: Path):
+    """回归（2026-10-11 踩坑）：指针文件残留旧值时，切换必须以新路径为准，
+    不能被 load() 按旧指针覆盖回去。"""
+    import json as _json
+    config.WORKSPACE_POINTER.write_text(
+        _json.dumps({"workspace": str(ws)}), encoding="utf-8")   # 旧指针指向当前 ws
+    other = ws.parent / "ws2"
+    other.mkdir()
+    manager.switch_workspace(other)
+    assert manager.workspace == other                     # 新路径生效
+    manager.load()                                        # load 按新指针读取，不回跳
+    assert manager.workspace == other
+
+
 # ---------- 路径解析（M6 回归） ----------
 def test_v11_default_paths(ws: Path):
     t = _mk_task(ws)
