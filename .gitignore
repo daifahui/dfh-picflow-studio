@@ -28,3 +28,4 @@ Desktop.ini
 logs/
 pytest_cache/
 acceptance_images/
+.tree/
