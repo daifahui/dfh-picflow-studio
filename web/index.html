@@ -13,7 +13,6 @@
 
 <header>
   <h1>Prompt Studio</h1>
-  <span class="sub">本地批量提示词提取 + Qwen-Image-2.1 文生图</span>
   <span id="health" class="health">
     LLM <b :class="health.llm ? 'on' : 'off'" x-text="health.llm ? '运行中' : '未启动'"></b>　
     ComfyUI <b :class="health.comfy ? 'on' : 'off'" x-text="health.comfy ? '运行中' : '未启动'"></b>
@@ -29,9 +28,9 @@
 <!-- ============ 视图1：队列 / 工作区 ============ -->
 <main id="view-queue" x-show="view==='queue'">
   <section class="card">
-    <h2>工作区 <small>（本次批量作业的输出根目录）</small></h2>
+    <h2>工作区 <span class="qmark" title="本次批量作业的输出根目录：每个任务在其下建一个子目录，存放生成图与提示词">?</span></h2>
     <div class="row">
-      <input id="ws-path" x-model="wsInput" placeholder="工作区目录（默认 prompt-studio/outputs）">
+      <input id="ws-path" type="text" x-model="wsInput" placeholder="工作区目录（默认 prompt-studio/outputs）">
       <button id="btn-ws-browse" @click="browseWorkspace()">选择…</button>
       <button id="btn-ws-apply" @click="applyWorkspace()">应用</button>
     </div>
@@ -39,9 +38,9 @@
   </section>
 
   <section class="card">
-    <h2>导入任务 <small>（可连续导入多个压缩包/文件夹）</small></h2>
+    <h2>导入任务 <span class="qmark" title="可连续导入多个压缩包/文件夹，组成队列依次串行执行">?</span></h2>
     <div class="row">
-      <input id="import-path" x-model="imp.path" placeholder="文件夹路径或压缩包路径（zip / 7z）">
+      <input id="import-path" type="text" x-model="imp.path" placeholder="文件夹路径或压缩包路径（zip / 7z）">
       <button id="btn-browse" @click="browseImport()">选择文件夹…</button>
     </div>
     <div class="row">
@@ -65,7 +64,7 @@
       <textarea id="imp-template" rows="4" x-model="imp.template"></textarea>
     </label>
     <div class="row">
-      <input id="import-name" x-model="imp.name" placeholder="任务名（可留空：先占位，首图提取后 AI 自动命名）">
+      <input id="import-name" type="text" x-model="imp.name" placeholder="任务名（可留空：先占位，首图提取后 AI 自动命名）">
     </div>
     <div class="row">
       <label class="inline">模式
@@ -77,12 +76,12 @@
       <label class="inline check"><input type="checkbox" x-model="imp.aiName"> AI 命名</label>
     </div>
     <details class="adv">
-      <summary>输出目录与生图参数（可选）</summary>
+      <summary>输出目录与生图参数 <span class="qmark" title="均可留空使用默认值；生图参数默认与 akane 实跑一致">?</span></summary>
       <div class="row">
-        <input id="imp-img-dir" x-model="imp.imgDir" placeholder="图片输出目录（默认 工作区/&lt;任务名&gt;）">
+        <input id="imp-img-dir" type="text" x-model="imp.imgDir" placeholder="图片输出目录（默认 工作区/&lt;任务名&gt;）">
       </div>
       <div class="row">
-        <input id="imp-prompt-dir" x-model="imp.promptDir" placeholder="提示词输出目录（默认 图片输出目录/prompts）">
+        <input id="imp-prompt-dir" type="text" x-model="imp.promptDir" placeholder="提示词输出目录（默认 图片输出目录/prompts）">
       </div>
       <div class="row">
         <label class="inline">语言模型
@@ -255,12 +254,12 @@
   <button id="detail-close" class="ghost" @click="detailOpen = false">×</button>
   <div class="detail-imgs">
     <figure>
-      <figcaption>原图（点击放大）</figcaption>
+      <figcaption>原图 <span class="qmark" title="点击全屏放大，Esc 或点击关闭">?</span></figcaption>
       <img id="detail-src" :src="detailOpen ? `/api/tasks/${sel}/img/src/${detail.seq}` : ''"
            @click="lightboxUrl = $event.target.src">
     </figure>
     <figure x-show="detail.out_image">
-      <figcaption>生成图（点击放大）</figcaption>
+      <figcaption>生成图 <span class="qmark" title="点击全屏放大，Esc 或点击关闭">?</span></figcaption>
       <img id="detail-out" :src="detail.out_image ? `/api/tasks/${sel}/img/out/${detail.seq}` : ''"
            @click="lightboxUrl = $event.target.src">
     </figure>
@@ -269,10 +268,10 @@
     <textarea id="detail-prompt" rows="10" x-model="detail.prompt"></textarea>
   </label>
   <label>wh_ratio <input id="detail-ratio" x-model="detail.ratio"></label>
-  <label>标签（逗号分隔，保存后同步 LoRA sidecar）
-    <input id="detail-tags" x-model="detail.tags">
+  <label>标签 <span class="qmark" title="逗号分隔；保存后同步写入 LoRA 惯例的 sidecar txt（与图同名成对）">?</span>
+    <input id="detail-tags" type="text" x-model="detail.tags">
   </label>
-  <label>注释（重新提取时附加给模型）
+  <label>注释 <span class="qmark" title="带注释重新提取时附加给模型，引导其修正改写方向">?</span>
     <textarea id="detail-note" rows="3" x-model="detail.note"
               placeholder="例：头发改成银白色，不要手表"></textarea>
   </label>

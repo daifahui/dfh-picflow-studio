@@ -28,13 +28,28 @@ main { padding: 16px 20px 40px; }
 .card h2 { font-size: 15px; margin: 2px 0 12px; }
 .card h2 small { color: var(--dim); font-weight: 400; }
 
+/* 问号提示：鼠标悬停显示 title 说明 */
+.qmark { display: inline-flex; align-items: center; justify-content: center;
+  width: 15px; height: 15px; margin-left: 2px; border: 1px solid var(--line);
+  border-radius: 50%; color: var(--dim); font-size: 11px; line-height: 1;
+  cursor: help; vertical-align: middle; user-select: none; }
+.qmark:hover { color: var(--text); border-color: var(--dim); }
+
 .row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
 .row.spread { justify-content: space-between; }
-input[type=text], textarea, input[type=number], select {
+input[type=text], textarea, input[type=number], select,
+input:not([type]) {   /* 未标 type 的输入同样走暗色主题，防白底突兀 */
   background: #12151a; color: var(--text); border: 1px solid var(--line);
   border-radius: 6px; padding: 7px 10px; width: 100%; }
-#src-path { flex: 1; }
-input[type=file] { color: var(--dim); }
+/* 行内文本输入撑满剩余宽度（选择器含未标 type 的兜底） */
+.row > input[type=text], .row > input[type=number], .row > input:not([type]) {
+  flex: 1 1 0; min-width: 140px; width: auto; }
+#src-path, #ws-path, #import-path { flex: 1 1 0; }
+input[type=file] { color: var(--dim); background: #12151a;
+  border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; width: auto; }
+input[type=file]::file-selector-button { background: #262c37; color: var(--text);
+  border: 1px solid var(--line); border-radius: 4px; padding: 4px 10px;
+  margin-right: 8px; cursor: pointer; }
 textarea { resize: vertical; font: 13px/1.5 Consolas, monospace; }
 
 button { border: 1px solid var(--line); background: #262c37; color: var(--text);
