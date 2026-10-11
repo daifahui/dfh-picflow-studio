@@ -39,16 +39,14 @@
 
 ## 依赖的外部设施
 
-| 设施 | 位置 |
-|---|---|
-| llama-server 启动脚本 | `D:\work_space\ai\llm\qwen_28b\start-qwen-iq2-m-64k.cmd` |
-| prompt-writing skill（实时读取） | `C:\Users\admin\.pi\agent\skills\qwen-image-21-prompt-writing\` |
-| ComfyUI 整合包 | `D:\Program Files\Comfyui-WF-2026.8.8\ComfyUI` |
+机器相关路径（llama-server 启动脚本 / skill 目录 / ComfyUI 目录等）通过仓库根目录的
+**`config.local.json`** 配置（gitignored；模板见 `config.local.example.json`，缺省值 =
+作者机器布局）。换电脑 / 换目录零代码改动，完整流程见 **[SETUP.md](SETUP.md)**。
 
 设计与实现细节（含测试体系、里程碑、决策记录）见 `doc/01_prompt-studio整体设计.md`。
 
 ## 测试
 
 ```
-.venv\Scripts\python -m pytest tests\ -q     # 97 用例（pytest + respx + Playwright/Edge）
+.venv\Scripts\python -m pytest tests\ -q     # 123 用例（pytest + respx + Playwright/Edge，模型全桩）
 ```

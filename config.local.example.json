@@ -1,0 +1,27 @@
+{
+  "_说明": "复制本文件为 config.local.json（已被 .gitignore 忽略），按新机器实际情况修改。省略的 key 使用仓库默认值（=作者机器布局，见 server/config.py）。",
+
+  "pi_skill_dir": "C:/Users/<你>/.pi/agent/skills/qwen-image-21-prompt-writing",
+
+  "lm_profiles": {
+    "iq2_m_64k": {
+      "cmd": "D:/work_space/ai/llm/qwen_28b/start-qwen-iq2-m-64k.cmd",
+      "alias": "qwen3.8-27b-uncensored",
+      "label": "IQ2_M · 64K 大上下文（快，可贴图）"
+    },
+    "q4_k_m": {
+      "cmd": "D:/work_space/ai/llm/qwen_28b/start-qwen-q4-k-m.cmd",
+      "alias": "qwen3.8-27b-uncensored@q4_k_m",
+      "label": "Q4_K_M · 高质量（慢，16K 上下文）"
+    }
+  },
+  "lm_api_base": "http://127.0.0.1:1234",
+
+  "comfyui_dir": "D:/Program Files/Comfyui-WF-2026.8.8/ComfyUI",
+  "comfyui_python": "D:/Program Files/Comfyui-WF-2026.8.8/python/python.exe",
+  "comfy_models_dir": "D:/Program Files/Comfyui-WF-2026.8.8/ComfyUI/models/diffusion_models",
+  "comfy_api_base": "http://127.0.0.1:8188",
+
+  "web_host": "127.0.0.1",
+  "web_port": 9178
+}

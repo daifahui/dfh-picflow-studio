@@ -387,3 +387,17 @@ def test_workspace_switch_roundtrip(page, tmp_path):
         "document.body._x_dataStack[0].ws.workspace.endsWith('ws-live')",
         timeout=8000)
     assert page.text_content("#view-queue .card .hint").strip().endswith("ws-live")
+
+
+def test_browse_dir_empty_degrades_to_hint(page):
+    """§21：目录框不可用（无桌面环境/取消）时日志提示手输路径，不报错不静默。"""
+    page.route("**/api/browse/dir", lambda route: route.fulfill(
+        status=200, content_type="application/json", body='{"path": ""}'))
+    page.goto(BASE)
+    page.wait_for_function(
+        "!!document.body._x_dataStack && document.body._x_dataStack.length > 0",
+        timeout=15000)
+    page.click("#btn-ws-browse")
+    page.wait_for_function(
+        "document.querySelector('#logs').textContent"
+        ".includes('请手输路径')", timeout=8000)

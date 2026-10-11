@@ -2,8 +2,8 @@
 
 > 项目代号：**prompt-studio**
 > 位置：`D:\work_space\ai\llm\qwen_28b\prompt-studio\`（git 管理）
-> 版本：v1.6（2026-10-11，新增 §20 队列页布局与排序修订；v1.5 新增 §19；v1.4 新增 §18）
-> 状态：**v2.2（含 §18 三特性与 §19 体验修订）已实测通过；§20 本轮实施**
+> 版本：v1.7（2026-10-11，新增 §21 GitHub 上传与新机迁移预案；v1.6 新增 §20；v1.5 新增 §19）
+> 状态：**v2.3 已实测通过；§21 本轮实施（仓库已达可上传状态，私有仓库）**
 
 ---
 
@@ -603,3 +603,43 @@ FastAPI 后端 (server/)
 - 队列表头三个可排序列升降切换正确、指示箭头准确、刷新后保持上次选择；默认时间早→晚；
 - 工作区「选择…→应用」端到端实测切到新工作区；
 - 既有 113 桩用例 + 新增用例全绿（不启用大模型）。
+
+## 21 · GitHub 上传与新机迁移预案（2026-10-11 用户需求评审，v1.7 定稿）
+
+> 背景：用户要把本工程上传 GitHub（私有仓库），并要求能在另一台电脑执行同一套工作流
+> （caption + 生图 + 网页）。经评估**不采用 Docker**：本项目的重心是机器级资产
+> （llama.cpp / ComfyUI 整合包 / 数十 GB 模型 / N 卡），容器化收益最大的网页层本就是
+> 纯 Python + 免构建前端 + 自举启动脚本；而 Windows GPU 容器需 Docker Desktop + WSL2 +
+> NVIDIA Container Toolkit 三层间接，且服务器端 tkinter 目录框在容器内无显示环境。
+> 结论：**纯代码仓库 + 机器配置外置 + 装机文档**，Docker 仅在 Linux/无头/反复部署场景再议。
+
+### 21.1 三步实施
+
+| 步骤 | 内容 | 落地 |
+|---|---|---|
+| S1 仓库卫生 | 仓库只含代码；用户数据/生成物/本机状态一律不追踪 | .gitignore 补 `workspace.json`（工作区指针）、`config.local.json`（本机配置）、`.pytest_cache/`（原写法缺点号无效）；outputs/uploads/logs/acceptance_images/.tree/.venv 此前已忽略。仓库设 **private**（工作区提示词与验收图为个人数据） |
+| S2 机器配置外置 | 新增 `config.local.json`（gitignored）覆盖机器相关路径，import 时执行 `_apply_local_overrides()`；模板 `config.local.example.json` 进仓库 | 可覆盖 key：`pi_skill_dir` / `lm_profiles`（整表替换，缺 `iq2_m_64k` 时默认档位与 alias 整体回退第一项）/ `lm_api_base` / `comfyui_dir` / `comfyui_python` / `comfy_models_dir` / `comfy_api_base` / `web_host` / `web_port`。`comfyui_python` 缺省派生 `<comfyui_dir 同级>/python/python.exe`、`comfy_models_dir` 缺省派生 `<comfyui_dir>/models/diffusion_models`（整合包布局）。config.py 内写死值 = 作者机器布局，作为缺省可运行值；所有消费方均为 `config.X` 属性访问，import 时覆盖即全量生效。坏 JSON 抛 RuntimeError 快速失败 |
+| S3 装机文档 | 新增 `SETUP.md`：前置条件 → clone → start-server.cmd 自举 → 复制模板填路径 → llama.cpp 预编译版 + HF 模型清单 + ComfyUI portable + skill 拷贝 → 验证步骤 → 迁移限制 | README 同步改版：外部设施表改为指向 config.local 机制与 SETUP.md；测试用例数修正 |
+
+附带（S2 的可移植性补丁）：`/api/browse/dir` 在无桌面环境返回空路径时，前端两个
+「选择…」按钮改为写运行日志「请手输路径」（原先静默无反馈）；端到端测试覆盖。
+
+### 21.2 上传 GitHub 的操作（用户执行）
+
+```
+cd prompt-studio
+git remote add origin git@github.com:<账号>/prompt-studio.git   # 先在 GitHub 建 private 空仓库
+git push -u origin main
+```
+
+新机器按 SETUP.md 走；要点重申：**旧工作区数据不整包拷贝**（task.json/workspace.json
+记绝对路径，换机只读回看受限），新机器指定新工作区从头建；模型从 HuggingFace 重新下载
+（GGUF 均公开）；`config.local.json` 每台机器各一份。
+
+### 21.3 验收
+
+- 123 桩用例全绿（新增 test_config.py 5 例：覆盖/派生/显式优先/档位回退/坏 JSON；
+  新增 e2e 目录框降级提示 1 例）；
+- 本机行为零变化：config.local.json 不存在时全部走原默认值（本机无需建 local 文件）；
+- `git status` 干净：workspace.json、config.local.json、outputs/ 等均不入库；
+- README 不再出现作者机器绝对路径（改由 config.local / SETUP 承载）。

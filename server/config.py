@@ -3,7 +3,11 @@
 约束：
 - llama-server 与 ComfyUI 一律不自动启动（除用户在网页上点击任务按钮触发的任务流程）；
   开发/测试期运行它们需用户明确批准。
+- 机器相关路径（llama 启动脚本 / ComfyUI 目录 / skill 目录等）可用仓库根目录的
+  config.local.json 覆盖（gitignored，模板见 config.local.example.json，§21）；
+  下面写死的值即作者机器的实际情况，作为无 local 文件时的可运行默认。
 """
+import json
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent          # prompt-studio/
@@ -89,3 +93,59 @@ def known_unets() -> list[str]:
                    if p.suffix.lower() in (".safetensors", ".gguf"))
     qwen = [n for n in names if n.lower().startswith("qwen")]
     return qwen + [n for n in names if not n.lower().startswith("qwen")]
+
+
+# ---- 机器相关配置外置（§21）----
+# config.local.json（gitignored）在 import 时覆盖上面的默认值；换机器零代码改动。
+# 允许的 key 与 config.local.example.json 一一对应：
+#   pi_skill_dir / lm_profiles / lm_api_base / comfyui_dir / comfyui_python /
+#   comfy_models_dir / comfy_api_base / web_host / web_port
+CONFIG_LOCAL_PATH = BASE_DIR / "config.local.json"
+
+
+def _apply_local_overrides() -> None:
+    """按 config.local.json 覆盖机器相关配置（import 时执行一次）。
+    comfyui_python 缺省派生自 <comfyui_dir 同级>/python/python.exe（整合包布局），
+    comfy_models_dir 缺省派生自 <comfyui_dir>/models/diffusion_models。"""
+    if not CONFIG_LOCAL_PATH.exists():
+        return
+    try:
+        local = json.loads(CONFIG_LOCAL_PATH.read_text(encoding="utf-8"))
+    except Exception as e:                      # noqa: BLE001
+        raise RuntimeError(f"config.local.json 解析失败：{e}") from e
+
+    global PI_SKILL_DIR, LM_PROFILES, LM_API_BASE, LM_MODEL_ALIAS, DEFAULT_PARAMS
+    global COMFYUI_DIR, COMFYUI_PYTHON, COMFY_MODELS_DIR, COMFY_API_BASE
+    global WEB_HOST, WEB_PORT
+
+    if local.get("pi_skill_dir"):
+        PI_SKILL_DIR = Path(local["pi_skill_dir"])
+    if local.get("lm_profiles"):
+        LM_PROFILES = {k: {"cmd": v["cmd"], "alias": v["alias"],
+                           "label": v.get("label", k)}
+                       for k, v in local["lm_profiles"].items()}
+        # 默认档位 key 不在档位表时整体回退第一项（含 DEFAULT_PARAMS.lm_profile）
+        fallback = next(iter(LM_PROFILES))
+        default_profile = LM_PROFILES.get("iq2_m_64k") or LM_PROFILES[fallback]
+        LM_MODEL_ALIAS = default_profile["alias"]
+        DEFAULT_PARAMS["lm_profile"] = ("iq2_m_64k" if "iq2_m_64k" in LM_PROFILES
+                                        else fallback)
+    if local.get("lm_api_base"):
+        LM_API_BASE = local["lm_api_base"]
+    if local.get("comfyui_dir"):
+        COMFYUI_DIR = Path(local["comfyui_dir"])
+        COMFYUI_PYTHON = COMFYUI_DIR.parent / "python" / "python.exe"
+        COMFY_MODELS_DIR = COMFYUI_DIR / "models" / "diffusion_models"
+    if local.get("comfyui_python"):
+        COMFYUI_PYTHON = Path(local["comfyui_python"])
+    if local.get("comfy_models_dir"):
+        COMFY_MODELS_DIR = Path(local["comfy_models_dir"])
+    if local.get("comfy_api_base"):
+        COMFY_API_BASE = local["comfy_api_base"]
+    if local.get("web_host"):
+        WEB_HOST = local["web_host"]
+    if local.get("web_port"):
+        WEB_PORT = int(local["web_port"])
+
+
+_apply_local_overrides()

@@ -215,6 +215,7 @@ function studio() {
     async browseWorkspace() {
       const r = await this.post("/api/browse/dir");
       if (r.path) this.wsInput = r.path;
+      else this.addLog("[warn] 服务器未能返回目录（可能无桌面环境），请手输路径");
     },
     async applyWorkspace() {
       try {
@@ -227,6 +228,7 @@ function studio() {
     async browseImport() {
       const r = await this.post("/api/browse/dir");
       if (r.path) this.imp.path = r.path;
+      else this.addLog("[warn] 服务器未能返回目录（可能无桌面环境），请手输路径");
     },
     onKindChange() {
       this.imp.template = this.modelOptions.templates[this.imp.kind] || "";

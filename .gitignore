@@ -29,3 +29,8 @@ logs/
 pytest_cache/
 acceptance_images/
 .tree/
+
+# 本机私有配置与状态（§21）
+workspace.json
+config.local.json
+.pytest_cache/
