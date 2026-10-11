@@ -265,7 +265,8 @@ def test_sse_events_drive_queue_progress(page):
         {"event": "queue", "workspace": "W", "running": True, "gate": False,
          "paused": False, "queue": [
              {"id": "T1", "name": "注入任务", "phase": "generating",
-              "mode": "auto", "source": "S", "total": 4,
+              "mode": "auto", "kind": "t2i", "source": "S", "total": 4,
+              "created": "12:00:00",
               "counts": {"pending": 0, "captioned": 2, "done": 2, "failed": 0},
               "images_dir": "W/T1", "prompts_dir": "W/T1/prompts"}]},
         {"event": "progress", "task_id": "T1", "task_name": "注入任务",

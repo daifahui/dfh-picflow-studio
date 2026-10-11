@@ -175,3 +175,26 @@ aside .row { margin-top: 12px; }
   background: #0c0e12ee; border-top: 1px solid var(--line); padding: 6px 16px;
   font: 11px/1.7 Consolas, monospace; color: var(--dim); z-index: 20; }
 #logs div { white-space: pre-wrap; }
+
+/* ---------- 队列视图两栏布局（§19 R3/R7） ---------- */
+.queue-layout { display: grid; grid-template-columns: minmax(0, 1fr) 360px;
+  gap: 14px; align-items: start; }
+.main-col { min-width: 0; }
+.side-col { display: flex; flex-direction: column; gap: 14px; position: sticky; top: 12px; }
+.side-col .card { margin-bottom: 0; }
+
+#logs { position: static; max-height: none; height: 180px; overflow-y: auto;
+  background: none; border: none; padding: 0; font-size: 11px; }
+.log-scroll { height: 180px; }
+
+.live-prompt { height: 120px; overflow-y: auto; white-space: pre-wrap;
+  margin-top: 0; }   /* 固定高度防逐字增长引发页面抖动（§19 R4） */
+.preview-img { width: 100%; border-radius: 6px; border: 1px solid var(--line);
+  aspect-ratio: auto; max-height: 300px; object-fit: contain; background: #12151a; }
+
+#import-card.drag { outline: 2px dashed var(--accent); outline-offset: -6px;
+  background: #1a2130; }
+.drop-hint { margin: 0 0 8px; }
+
+@media (max-width: 1200px) { .queue-layout { grid-template-columns: 1fr; }
+  .side-col { position: static; } }

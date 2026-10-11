@@ -118,6 +118,7 @@ class Task:
         return {"id": self.id, "name": self.name, "phase": self.phase,
                 "mode": self.mode, "kind": self.kind, "source": self.source_desc,
                 "total": len(self.items), "counts": self.counts(),
+                "created": time.strftime("%H:%M:%S", time.localtime(self.created_at)),
                 "images_dir": str(self.images_dir),
                 "prompts_dir": str(self.prompts_dir)}
 
@@ -150,8 +151,10 @@ class WorkspaceManager:
             return self._tasks.get(tid)
 
     def all_tasks(self) -> list[Task]:
+        """按创建时间早→晚返回（§19 R6：重命名后队列显示顺序不再错乱）。"""
         with self._lock:
-            return [self._tasks[tid] for tid in self._queue if tid in self._tasks]
+            tasks = [self._tasks[tid] for tid in self._queue if tid in self._tasks]
+        return sorted(tasks, key=lambda t: (t.created_at, t.id))
 
     def item(self, t: Task, seq: int) -> Item | None:
         for it in t.items:

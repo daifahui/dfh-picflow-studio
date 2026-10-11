@@ -81,8 +81,11 @@ DEFAULT_PARAMS = {
 }
 
 def known_unets() -> list[str]:
-    """扫描 diffusion_models 目录的可用生图模型（ComfyUI 未运行时的静态回退，§18.2）。"""
+    """扫描 diffusion_models 目录的可用生图模型（ComfyUI 未运行时的静态回退，§18.2）。
+    qwen 系排最前（默认模型恒在首位），其余字母序（§19 R1）。"""
     if not COMFY_MODELS_DIR.is_dir():
         return [DEFAULT_PARAMS["comfy_model"]]
-    return sorted(p.name for p in COMFY_MODELS_DIR.iterdir()
-                  if p.suffix.lower() in (".safetensors", ".gguf"))
+    names = sorted(p.name for p in COMFY_MODELS_DIR.iterdir()
+                   if p.suffix.lower() in (".safetensors", ".gguf"))
+    qwen = [n for n in names if n.lower().startswith("qwen")]
+    return qwen + [n for n in names if not n.lower().startswith("qwen")]
