@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Prompt Studio</title>
+<title>DFH PicFlow Studio</title>
 <link rel="stylesheet" href="/static/style.css">
 <script defer src="/static/alpine.min.js"></script>
 <script src="/static/app.js"></script>
@@ -12,7 +12,7 @@
       @keydown.escape.window="lightboxUrl = ''">
 
 <header>
-  <h1>Prompt Studio</h1>
+  <h1>DFH PicFlow Studio</h1>
   <span id="health" class="health">
     LLM <b :class="health.llm ? 'on' : 'off'" x-text="health.llm ? '运行中' : '未启动'"></b>　
     ComfyUI <b :class="health.comfy ? 'on' : 'off'" x-text="health.comfy ? '运行中' : '未启动'"></b>
@@ -32,7 +32,7 @@
   <section class="card" id="ws-card">
     <h2>工作区 <span class="qmark" title="本次批量作业的输出根目录：每个任务在其下建一个子目录，存放生成图与提示词">?</span></h2>
     <div class="row">
-      <input id="ws-path" type="text" x-model="wsInput" placeholder="工作区目录（默认 prompt-studio/outputs）">
+      <input id="ws-path" type="text" x-model="wsInput" placeholder="工作区目录（默认 dfh-picflow-studio/outputs）">
       <button id="btn-ws-browse" @click="browseWorkspace()">选择…</button>
       <button id="btn-ws-apply" @click="applyWorkspace()">应用</button>
     </div>

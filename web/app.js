@@ -1,4 +1,4 @@
-/* Prompt Studio 前端（Alpine.js 组件）：工作区/队列/审阅/结果 三视图。 */
+/* DFH PicFlow Studio 前端（Alpine.js 组件）：工作区/队列/审阅/结果 三视图。 */
 "use strict";
 
 function studio() {

@@ -1,8 +1,8 @@
-# 01 · Prompt Studio 整体设计
+# 01 · DFH PicFlow Studio 整体设计
 
-> 项目代号：**prompt-studio**
-> 位置：`D:\work_space\ai\llm\qwen_28b\prompt-studio\`（git 管理）
-> 版本：v1.7（2026-10-11，新增 §21 GitHub 上传与新机迁移预案；v1.6 新增 §20；v1.5 新增 §19）
+> 项目代号：**dfh-picflow-studio**（2026-10-11 由 prompt-studio 定名更替，dfh=个人品牌，picflow=图片流水线）
+> 位置：`D:\work_space\ai\llm\qwen_28b\dfh-picflow-studio\`（git 管理）
+> 版本：v1.8（2026-10-11，定名 dfh-picflow-studio 并全量替换；v1.7 新增 §21 迁移预案；v1.6 新增 §20）
 > 状态：**v2.3 已实测通过；§21 本轮实施（仓库已达可上传状态，私有仓库）**
 
 ---
@@ -195,7 +195,7 @@ outputs/                      ← 工作区（v1.1 固定为 outputs/；v2.0 起
 ## 10. 代码目录结构（现状）
 
 ```
-prompt-studio/
+dfh-picflow-studio/
   doc/                    ← 设计文档（本文件所在）
   server/
     main.py               ← FastAPI 入口 + 路由 + 两阶段 worker
@@ -237,7 +237,7 @@ prompt-studio/
 
 | 项 | 决策 |
 |---|---|
-| 项目名与位置 | `prompt-studio` @ `D:\work_space\ai\llm\qwen_28b\prompt-studio\`，git 管理，模型/输出等大文件不追踪 |
+| 项目名与位置 | `dfh-picflow-studio`（原 prompt-studio，2026-10-11 定名）@ `D:\work_space\ai\llm\qwen_28b\dfh-picflow-studio\`，git 管理，模型/输出等大文件不追踪 |
 | skill 读取策略 | **实时读取** pi skills 目录，路径做配置项，不拷贝快照 |
 | Web 端口 | **9178** |
 | 大图量加载 | v1 缩略图懒加载，分页视实际需要 |
@@ -627,8 +627,8 @@ FastAPI 后端 (server/)
 ### 21.2 上传 GitHub 的操作（用户执行）
 
 ```
-cd prompt-studio
-git remote add origin git@github.com:<账号>/prompt-studio.git   # 先在 GitHub 建 private 空仓库
+cd dfh-picflow-studio
+git remote add origin https://github.com/daifahui/dfh-picflow-studio.git   # 先在 GitHub 建 private 空仓库
 git push -u origin main
 ```
 
@@ -643,3 +643,13 @@ git push -u origin main
 - 本机行为零变化：config.local.json 不存在时全部走原默认值（本机无需建 local 文件）；
 - `git status` 干净：workspace.json、config.local.json、outputs/ 等均不入库；
 - README 不再出现作者机器绝对路径（改由 config.local / SETUP 承载）。
+
+### 21.4 定名 dfh-picflow-studio（2026-10-11，v1.8）
+
+用户定名：**dfh-picflow-studio**（dfh = 个人品牌前缀，picflow-studio = 图片流水线工作室；
+展示名 **DFH PicFlow Studio**）。原 prompt-studio 名不副实——项目已从"提示词工作室"
+长成"两阶段批量生图流水线"（工作区+队列 / LLM 提词 / 审阅 / ComfyUI 批量出图 /
+资产与换脸）。全量替换范围：网页标题与页首、FastAPI title、ComfyUI client_id、
+README / SETUP / 本设计文档（含文件名 git mv）、start-server.cmd 提示、
+e2e 标题断言、工作区占位文案；本地目录同步更名为 `dfh-picflow-studio`。
+GitHub 仓库名 = `dfh-picflow-studio`（private）。

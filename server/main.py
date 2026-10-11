@@ -1,4 +1,4 @@
-"""Prompt Studio 服务端入口：工作区/队列路由 + 批处理 worker。
+"""DFH PicFlow Studio 服务端入口：工作区/队列路由 + 批处理 worker。
 
 运行边界：llama-server / ComfyUI 只会被任务流程（用户在网页点击按钮）拉起；
 开发测试期手动运行它们需用户批准（设计文档 §12）。
@@ -27,7 +27,7 @@ import httpx
 from . import comfy_client, config, input_ingest, llm_caption, sse
 from .state import Item, Task, manager, sanitize_name
 
-app = FastAPI(title="Prompt Studio")
+app = FastAPI(title="DFH PicFlow Studio")
 
 
 @app.on_event("startup")

@@ -1,6 +1,6 @@
 # 新机器装机指南（SETUP）
 
-把 Prompt Studio 搬到另一台电脑（Windows + NVIDIA GPU）的完整流程。
+把 DFH PicFlow Studio 搬到另一台电脑（Windows + NVIDIA GPU）的完整流程。
 仓库只含代码；模型与外部程序是机器级资产，需要按本指南在新机器重新就位。
 
 ## 0. 前置条件
@@ -16,7 +16,7 @@
 
 ```
 git clone <你的私有仓库地址>
-cd prompt-studio
+cd dfh-picflow-studio
 start-server.cmd          ← 首次自动创建 .venv 并安装 requirements.txt
 ```
 

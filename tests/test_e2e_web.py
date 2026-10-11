@@ -130,7 +130,7 @@ def sse_payload(*events) -> str:
 
 def test_home_renders_tabs_and_health(page):
     page.goto(BASE)
-    assert "Prompt Studio" in page.title()
+    assert "DFH PicFlow Studio" in page.title()
     page.wait_for_function(
         "document.querySelectorAll('#tabs button').length === 3", timeout=10000)
     page.wait_for_function(

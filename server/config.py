@@ -10,7 +10,7 @@
 import json
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent          # prompt-studio/
+BASE_DIR = Path(__file__).resolve().parent.parent          # dfh-picflow-studio/
 WEB_DIR = BASE_DIR / "web"
 OUTPUT_ROOT = BASE_DIR / "outputs"                          # 默认工作区
 WORKSPACE_POINTER = BASE_DIR / "workspace.json"             # 上次工作区路径指针（gitignore）

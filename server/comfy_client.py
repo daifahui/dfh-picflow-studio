@@ -175,7 +175,7 @@ def generate_edit(image_paths: list[Path], prompt: str,
 
 def _submit_and_fetch(graph: dict) -> bytes:
     r = httpx.post(f"{config.COMFY_API_BASE}/prompt",
-                   json={"prompt": graph, "client_id": "prompt-studio"}, timeout=60)
+                   json={"prompt": graph, "client_id": "dfh-picflow-studio"}, timeout=60)
     r.raise_for_status()
     resp = r.json()
     if "prompt_id" not in resp:

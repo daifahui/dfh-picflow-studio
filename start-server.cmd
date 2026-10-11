@@ -1,5 +1,5 @@
 @echo off
-rem Prompt Studio 一键启动（只启动网页服务器，不会拉起任何模型）
+rem DFH PicFlow Studio 一键启动（只启动网页服务器，不会拉起任何模型）
 setlocal
 cd /d "%~dp0"
 if not exist .venv (
@@ -8,7 +8,7 @@ if not exist .venv (
   .venv\Scripts\python -m pip install --upgrade pip
   .venv\Scripts\python -m pip install -r requirements.txt || goto :err
 )
-echo [run] Prompt Studio: http://127.0.0.1:9178
+echo [run] DFH PicFlow Studio: http://127.0.0.1:9178
 .venv\Scripts\python -m uvicorn server.main:app --host 127.0.0.1 --port 9178
 goto :eof
 :err

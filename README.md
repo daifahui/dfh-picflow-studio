@@ -1,4 +1,4 @@
-# Prompt Studio
+# DFH PicFlow Studio
 
 本地批量提示词提取 + Qwen-Image-2.1 文生图服务器（网页界面）：工作区 + 任务队列，
 图片 → qwen3.8-27b 契约提示词（rewritten_prompt / wh_ratio / tags）→ ComfyUI 批量文生图。
@@ -43,7 +43,7 @@
 **`config.local.json`** 配置（gitignored；模板见 `config.local.example.json`，缺省值 =
 作者机器布局）。换电脑 / 换目录零代码改动，完整流程见 **[SETUP.md](SETUP.md)**。
 
-设计与实现细节（含测试体系、里程碑、决策记录）见 `doc/01_prompt-studio整体设计.md`。
+设计与实现细节（含测试体系、里程碑、决策记录）见 `doc/01_dfh-picflow-studio整体设计.md`。
 
 ## 测试
 
