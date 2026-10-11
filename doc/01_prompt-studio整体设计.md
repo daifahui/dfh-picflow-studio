@@ -2,8 +2,8 @@
 
 > 项目代号：**prompt-studio**
 > 位置：`D:\work_space\ai\llm\qwen_28b\prompt-studio\`（git 管理）
-> 版本：v1.3（2026-10-10 晚，新增 §16 工作区/队列/预览改造评估；v1.2 新增 §13/§14/§15）
-> 状态：**真实端到端验收通过（2026-10-10 晚，76 用例全绿）；§16 的 v1.1/v2.0 改造已评审定稿，待实施**
+> 版本：v1.4（2026-10-11，新增 §18 模型选择 / 人物资产 / 换脸；v1.3 新增 §16/§17）
+> 状态：**v2.0（工作区+队列+AI 命名+tags）已实测通过；§18 三特性已评审定稿，本轮实施**
 
 ---
 
@@ -481,3 +481,77 @@ FastAPI 后端 (server/)
 - caption 后：0001.json 含合法 tags 数组、tags/0001.txt 存在且内容一致；
 - 手动改 tags 保存：json 与 txt 同步更新；
 - 契约缺 tags / 坏 tags：不阻塞提取（空数组兜底）。
+
+---
+
+## 18 · 模型选择 / 人物资产 / 换脸（2026-10-11 用户需求评审，v1.4 定稿）
+
+### 18.0 需求与评估结论
+
+| # | 需求 | 评估 | 规模/风险 |
+|---|---|---|---|
+| A | **模型选择进界面**：LLM 档位（后续多模型）与 ComfyUI 生图模型可选 | LLM 双档脚本已在（iq2_m 64K / q4_k_m）；生图模型从 ComfyUI `/object_info/UNETLoader` 动态拉取，未运行时回退静态目录扫描 | 小-中 / 低 |
+| B | **人物资产生成**：多图输入（人物 + 衣服 + 多张参考），提示词开放可编辑（有默认），生成人物资产图 | 复用 Qwen-Image-2.1 官方 edit 管线；任务粒度从「每图一产物」变为「一组图一产物」 | 大 / 中 |
+| C | **换脸**：与 B 同构（主图 + 多张目标脸，有数量上限），仅默认提示词不同 → 需要**多默认提示词模板**机制 | 与 B 共用 multi 管线，模板按任务类型区分 | 小（随 B）/ 低 |
+
+**结论**：A 独立小改；B/C 合并为「多图编辑类任务」一个大特性，与现有 t2i 并列。
+版本 v2.1。
+
+### 18.1 已验证的对接口径（本轮实测探明）
+
+- `TextEncodeQwenImage21`（comfy_extras/nodes_qwen.py）：autogrow 输入 `images.image_1..image_16`
+  ——**参考图硬上限 16 张**，按编号排序拼入视觉序列，并输出「参考 latent」（第三个输出口）；
+  参考图按 resolution 预算（1024）缩放。
+- edit 等价 API 图：`UNETLoader → QwenImage21Cache(device=auto) → KSampler.model`；
+  `TextEncodeQwenImage21(clip, vae, prompt, negative_prompt, resolution, images.image_N)`
+  的 latent 直连 KSampler.latent_image（官方模板 custom_size=false 路径，输出尺寸跟随参考图）；
+  KSampler(euler/simple/cfg1/模板默认 25 步) → VAEDecode → SaveImage。
+- 参考图需先 `POST /upload/image` 传入 ComfyUI input 目录，LoadImage 引用返回的文件名。
+- GGUF 模型（qwen-image-2.1-UC-Q8_0.gguf）走 `UnetLoaderGGUF` 节点（ComfyUI-GGUF 已装），
+  按扩展名自动选 loader。
+- 多图编号约定：`images.image_N` 顺序 = 提示词中 `<image1>..<imageN>`（与官方模板一致）。
+- LLM 双档：iq2_m 64K（alias `qwen3.8-27b-uncensored`）/ q4_k_m 高质量（alias
+  `qwen3.8-27b-uncensored@q4_k_m`，慢）；`/v1/models` 返回当前 alias，可据此判断换档。
+
+### 18.2 A：模型选择
+
+- `config.LM_PROFILES`：档位表（key → 启动脚本/alias/标签/说明）；
+  `ensure_llm(profile_key)`：已运行且 alias 相同 → 复用；代管实例 alias 不同 → 关旧起新；
+  外部实例 alias 不同 → 只复用并告警（§3.3 外部不关）。
+- `GET /api/models`：`{"lm": [档位表], "unets": {...}}`；unets 优先 ComfyUI live
+  `/object_info/UNETLoader`（运行时），否则扫描 `models/diffusion_models` 目录（safetensors
+  + gguf），前端下拉。
+- UI：导入参数区「语言模型档位」「生图模型」下拉；任务级存储（lm_profile / comfy_model），
+  队列 caption 阶段按任务自动换档（换档代价 = LLM 重载，仅在档位变化时发生）。
+
+### 18.3 B+C：多图编辑类任务（kind = asset / faceswap）
+
+- **任务类型** `task.kind`：`t2i`（现有，N 图 → N 产物）/ `asset`（人物资产）/
+  `faceswap`（换脸）——asset 与 faceswap 共用 multi 管线，仅默认模板不同。
+- **输入**：文件夹 / zip·7z（复用现有摄取）或 **多文件上传**（新增 `POST /api/upload/batch`，
+  前端 `<input multiple>`）；图片自然排序编号 = `<image1>..<imageN>`；
+  数量上限 `MULTI_MAX_IMAGES = 8`（节点硬上限 16，留余量；导入超限 400）。
+  角色约定写进模板文案（asset：`<image1>`=人物、`<image2>`=服装、`<image3+>`=参考；
+  faceswap：`<image1>`=主图、`<image2+>`=目标脸，多脸可提升还原度）。
+- **提示词模板**：`config.DEFAULT_TEMPLATES[kind]` 默认模板，导入时填入可编辑文本框
+  （`params.prompt_template` 随任务保存）；caption 请求把模板与全部图片一并发给 LLM，
+  产出具体化的 `rewritten_prompt`（编辑指令）+ `wh_ratio`（按主图）+ `tags`；
+  审阅页可直接改写最终指令。
+- **multi 管线**（一次 LLM 调用、一次生成、一张产物）：
+  - caption：全部条目置 captioning → `caption_multi(全部图, 模板)` 一次调用 →
+    同一契约写入全部条目 → 全部 captioned；失败 → 全部 caption_failed（重试策略同 t2i）；
+  - generate：`upload_to_comfy` 逐张传入 → `build_edit_graph` → 一次采样 → 输出图挂到
+    seq=1 条目（其余条目置 done 无产物，结果画廊自动只显 1 张）；
+  - 审阅页：multi 任务点击任意输入图 → 侧栏显示该图 + 共享提示词/比例/标签（编辑广播到
+    全部条目）+「生成」按钮（整组重生成）。
+- **输出尺寸**：跟随参考图（edit latent 路径）；`wh_ratio` 仅展示与记录。
+- **进度语义**：multi 任务进度条按「任务级百分比」（captioning→generating），条目进度不适用。
+
+### 18.4 测试与验收
+
+- 单元：build_edit_graph 结构断言（loader 按扩展名切换、image_N 键序、latent 直连）；
+  caption_multi 请求构造（多 image_url、模板注入）与契约解析复用；
+- 接口：multi 导入（kind 校验/超限 400/upload batch）、multi 全流程（一次 LLM 调用、
+  一次生成、契约广播编辑）、/api/models 两态、换档逻辑（桩下 alias 断言）；
+- E2E：multi 任务导入→队列→结果一条；
+- **真实验收**：asset 一单（人物+服装+参考）+ faceswap 一单（主图+多脸），真模型出图。
