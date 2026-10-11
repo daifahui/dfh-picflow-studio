@@ -159,3 +159,14 @@ def test_all_tasks_sorted_by_created(ws: Path):
     c = _mk_task(ws, "aaa")
     assert manager.all_tasks() == [a, c]                 # 非字母序，按创建时间
     assert a.summary()["created"] and ":" in a.summary()["created"]
+
+
+def test_summary_has_created_ts(ws: Path):
+    """§20 R5：summary 携带 epoch 时间戳，供前端跨天稳定排序。"""
+    import time as _t
+    before = _t.time()
+    a = _mk_task(ws, "a")
+    s = a.summary()
+    assert isinstance(s["created_ts"], float)
+    assert before - 1 <= s["created_ts"] <= _t.time() + 1
+    assert s["created_ts"] == a.created_at

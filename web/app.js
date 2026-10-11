@@ -29,6 +29,16 @@ function studio() {
     typed: "",                            // 打字机渐显的最新提示词（队列页）
     viewMode: localStorage.getItem("ps-view-mode") || "lg",
     resultTick: 0,
+    /* 队列排序（§20 R5）：key=created/name/status，持久化到 localStorage */
+    queueSort: (() => {
+      try {
+        const s = JSON.parse(localStorage.getItem("ps-queue-sort") || "");
+        if (s && ["created", "name", "status"].includes(s.key))
+          return { key: s.key, dir: s.dir === "desc" ? "desc" : "asc" };
+      } catch { /* 损坏则回落默认 */ }
+      return { key: "created", dir: "asc" };
+    })(),
+    PHASE_ORDER: ["idle", "captioning", "reviewing", "generating", "done", "stopped"],
 
     /* ---------- 初始化 ---------- */
     async init() {
@@ -61,11 +71,41 @@ function studio() {
       } catch (e) { P.addLog("[warn] 初始化失败：" + e.message); }
       P.pollHealth();
       setInterval(() => P.pollHealth(), 5000);
+      P.wirePanelSync();
       // Esc 关闭 lightbox 由 body 上的 @keydown.escape.window 指令处理（在
       // Alpine 作用域内求值；原生监听闭包里的赋值不触发渲染，勿改回）
     },
 
     onSse(d) { this.onEvent(d); },
+
+    /* ---------- 卡片高度同步（§20 R2/R4） ----------
+       日志卡高度 = 左列「工作区卡顶→导入卡底」实际占位（含卡片间距）；
+       队列卡最小高度 = 右栏「预览卡顶→提示词卡底」实际占位。
+       直接改 DOM 样式（不经 Alpine 状态，无渲染依赖）；被测卡片尺寸
+       变化（导入卡展开/收起、图片加载等）由 ResizeObserver 自动跟随。 */
+    wirePanelSync() {
+      if (this._panelRO) return;
+      const q = (sel) => document.querySelector(sel);
+      const wsCard = q("#ws-card"), impCard = q("#import-card"),
+            logCard = q("#log-card"), prevCard = q("#preview-card"),
+            promptCard = q("#prompt-card"), queueCard = q("#queue-card");
+      if (!wsCard || !impCard || !logCard || !prevCard ||
+          !promptCard || !queueCard) return;
+      const sync = () => {
+        const wsTop = wsCard.getBoundingClientRect().top;
+        const impBottom = impCard.getBoundingClientRect().bottom;
+        logCard.style.height =
+          impBottom > wsTop ? `${Math.round(impBottom - wsTop)}px` : "";
+        const prevTop = prevCard.getBoundingClientRect().top;
+        const promptBottom = promptCard.getBoundingClientRect().bottom;
+        queueCard.style.minHeight =
+          promptBottom > prevTop ? `${Math.round(promptBottom - prevTop)}px` : "";
+      };
+      this._panelRO = new ResizeObserver(sync);
+      for (const el of [wsCard, impCard, prevCard, promptCard])
+        this._panelRO.observe(el);
+      sync();
+    },
 
     /* ---------- 工具 ---------- */
     async api(path, opts) {
@@ -318,6 +358,32 @@ function studio() {
       if (this.ws.running) return "（运行中）";
       if (this.ws.paused) return "（已暂停，点「继续」恢复）";
       return `（${n} 个任务）`;
+    },
+    /* ---------- 队列排序（§20 R5） ---------- */
+    sortValue(t) {
+      if (this.queueSort.key === "name") return t.name || "";
+      if (this.queueSort.key === "status")
+        return this.PHASE_ORDER.indexOf(t.phase);
+      return typeof t.created_ts === "number" ? t.created_ts : 0;
+    },
+    sortedQueue() {
+      const sign = this.queueSort.dir === "asc" ? 1 : -1;
+      return [...this.ws.queue].sort((a, b) => {
+        const va = this.sortValue(a), vb = this.sortValue(b);
+        if (va < vb) return -sign;
+        if (va > vb) return sign;
+        return (a.created_ts || 0) - (b.created_ts || 0);   // 同值按创建先后稳定
+      });
+    },
+    setQueueSort(key) {
+      const s = this.queueSort;
+      if (s.key === key) s.dir = s.dir === "asc" ? "desc" : "asc";
+      else { s.key = key; s.dir = "asc"; }
+      localStorage.setItem("ps-queue-sort", JSON.stringify(s));
+    },
+    sortInd(key) {
+      return this.queueSort.key === key
+        ? (this.queueSort.dir === "asc" ? "↑" : "↓") : "";
     },
     phaseLabel(p) {
       return { idle: "排队中", captioning: "提取中", reviewing: "待审阅/已提取",

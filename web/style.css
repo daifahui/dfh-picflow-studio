@@ -126,6 +126,11 @@ details.adv .row { margin-top: 8px; }
 .queue-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .queue-table th { text-align: left; color: var(--dim); font-weight: 400;
   font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+/* 可排序表头（§20 R5）：点击切换升降序，箭头指示当前列与方向 */
+.queue-table th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+.queue-table th.sortable:hover { color: var(--text); }
+.sort-ind { display: inline-block; min-width: 10px; color: var(--accent);
+  font-size: 11px; }
 .queue-table td { padding: 6px 8px; border-bottom: 1px solid var(--line);
   vertical-align: middle; }
 .queue-table tbody tr { cursor: pointer; }
@@ -176,25 +181,29 @@ aside .row { margin-top: 12px; }
   font: 11px/1.7 Consolas, monospace; color: var(--dim); z-index: 20; }
 #logs div { white-space: pre-wrap; }
 
-/* ---------- 队列视图两栏布局（§19 R3/R7） ---------- */
+/* ---------- 队列视图两栏布局（§19 R3/R7；§20 重排与等高） ---------- */
 .queue-layout { display: grid; grid-template-columns: minmax(0, 1fr) 360px;
   gap: 14px; align-items: start; }
 .main-col { min-width: 0; }
-.side-col { display: flex; flex-direction: column; gap: 14px; position: sticky; top: 12px; }
+.side-col { display: flex; flex-direction: column; gap: 14px; }
 .side-col .card { margin-bottom: 0; }
 
-#logs { position: static; max-height: none; height: 180px; overflow-y: auto;
+/* 运行日志卡置顶：高度由 JS 实测同步为左列工作区+导入占位（§20 R2），
+   内容超出卡内滚动 */
+#log-card { display: flex; flex-direction: column; min-height: 180px; }
+#logs { position: static; max-height: none; height: auto; overflow-y: auto;
   background: none; border: none; padding: 0; font-size: 11px; }
-.log-scroll { height: 180px; }
+.log-scroll { flex: 1 1 auto; min-height: 120px; }
 
 .live-prompt { height: 120px; overflow-y: auto; white-space: pre-wrap;
   margin-top: 0; }   /* 固定高度防逐字增长引发页面抖动（§19 R4） */
+/* 图片预览卡：默认即拉高（空态占位同高，§20 R3） */
+#preview-card { display: flex; flex-direction: column; min-height: 460px; }
 .preview-img { width: 100%; border-radius: 6px; border: 1px solid var(--line);
-  aspect-ratio: auto; max-height: 300px; object-fit: contain; background: #12151a; }
+  aspect-ratio: auto; max-height: 400px; object-fit: contain; background: #12151a; }
 
 #import-card.drag { outline: 2px dashed var(--accent); outline-offset: -6px;
   background: #1a2130; }
 .drop-hint { margin: 0 0 8px; }
 
-@media (max-width: 1200px) { .queue-layout { grid-template-columns: 1fr; }
-  .side-col { position: static; } }
+@media (max-width: 1200px) { .queue-layout { grid-template-columns: 1fr; } }

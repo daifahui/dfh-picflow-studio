@@ -119,6 +119,7 @@ class Task:
                 "mode": self.mode, "kind": self.kind, "source": self.source_desc,
                 "total": len(self.items), "counts": self.counts(),
                 "created": time.strftime("%H:%M:%S", time.localtime(self.created_at)),
+                "created_ts": self.created_at,   # epoch，前端跨天稳定排序（§20 R5）
                 "images_dir": str(self.images_dir),
                 "prompts_dir": str(self.prompts_dir)}
 

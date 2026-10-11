@@ -287,3 +287,103 @@ def test_sse_events_drive_queue_progress(page):
     page.wait_for_function(
         "document.querySelector('#progress-text').textContent.includes('2/4')",
         timeout=8000)
+
+
+def _injected_task(tid, name, phase, created, ts):
+    return {"id": tid, "name": name, "phase": phase, "mode": "auto",
+            "kind": "t2i", "source": "S", "total": 1, "created": created,
+            "created_ts": ts,
+            "counts": {"pending": 0, "captioned": 0, "done": 1, "failed": 0},
+            "images_dir": f"W/{tid}", "prompts_dir": f"W/{tid}/prompts"}
+
+
+def _row_names(page):
+    return page.eval_on_selector_all(
+        "#queue-table .name-edit", "els => els.map(e => e.value)")
+
+
+def test_queue_sort_by_created_name_status(page):
+    """§20 R5：表头点击按 时间/任务名/状态 排序，升降循环，箭头与持久化正确。"""
+    events = sse_payload(
+        {"event": "queue", "workspace": "W", "running": False, "gate": False,
+         "paused": False, "queue": [
+             _injected_task("T1", "bbb", "done", "08:00:00", 800.0),
+             _injected_task("T2", "aaa", "idle", "09:00:00", 900.0),
+             _injected_task("T3", "ccc", "generating", "07:00:00", 700.0)]})
+    mock_sse(page, events)
+    page.goto(BASE)
+    page.wait_for_function(
+        "document.querySelectorAll('#queue-table tbody tr').length === 3",
+        timeout=8000)
+    # 默认：时间升序（早→晚）
+    assert _row_names(page) == ["ccc", "bbb", "aaa"]
+    # 任务名升序 → 降序
+    page.click("#queue-table th:has-text('任务名')")
+    page.wait_for_function(
+        "JSON.stringify([...document.querySelectorAll('#queue-table .name-edit')]"
+        ".map(e => e.value)) === JSON.stringify(['aaa','bbb','ccc'])",
+        timeout=5000)
+    assert page.text_content("#queue-table th:has-text('任务名') .sort-ind") == "↑"
+    page.click("#queue-table th:has-text('任务名')")
+    page.wait_for_function(
+        "JSON.stringify([...document.querySelectorAll('#queue-table .name-edit')]"
+        ".map(e => e.value)) === JSON.stringify(['ccc','bbb','aaa'])",
+        timeout=5000)
+    assert page.text_content("#queue-table th:has-text('任务名') .sort-ind") == "↓"
+    # 状态升序：排队中 → 生成中 → 完成（业务流转序）
+    page.click("#queue-table th:has-text('状态')")
+    page.wait_for_function(
+        "JSON.stringify([...document.querySelectorAll('#queue-table .name-edit')]"
+        ".map(e => e.value)) === JSON.stringify(['aaa','ccc','bbb'])",
+        timeout=5000)
+    assert page.text_content("#queue-table th:has-text('时间') .sort-ind") == ""
+    assert "status" in page.evaluate("localStorage.getItem('ps-queue-sort')")
+    # 刷新后保持上次选择（状态降序：完成最前）
+    page.click("#queue-table th:has-text('状态')")     # 升 → 降
+    page.reload()
+    page.wait_for_function(
+        "JSON.stringify([...document.querySelectorAll('#queue-table .name-edit')]"
+        ".map(e => e.value)) === JSON.stringify(['bbb','ccc','aaa'])",
+        timeout=8000)
+    assert page.text_content("#queue-table th:has-text('状态') .sort-ind") == "↓"
+
+
+def test_panel_heights_sync(page):
+    """§20 R2/R4：日志卡高度=工作区+导入占位；队列卡≥预览+提示词占位。"""
+    page.goto(BASE)
+    page.wait_for_function(
+        "!!document.body._x_dataStack && document.body._x_dataStack.length > 0",
+        timeout=15000)
+    page.wait_for_function(
+        """() => {
+          const r = (s) => document.querySelector(s).getBoundingClientRect();
+          const log = r('#log-card'), ws = r('#ws-card'), imp = r('#import-card');
+          const queue = r('#queue-card'), prev = r('#preview-card'),
+                prompt = r('#prompt-card');
+          const logOk = Math.abs(log.height - (ws.height + 14 + imp.height)) <= 2;
+          const queueOk = queue.height >= prev.height + 14 + prompt.height - 2;
+          return logOk && queueOk;
+        }""", timeout=8000)
+    # 右栏顺序：运行日志 → 图片预览 → 提示词（§20 R1）
+    order = page.eval_on_selector_all(
+        "#view-queue .side-col h2", "els => els.map(e => e.textContent.trim())")
+    assert order == ["运行日志", "图片预览", "提示词"]
+    # 预览卡空态也保持拉高后的高度（§20 R3）
+    assert page.eval_on_selector(
+        "#preview-card", "e => e.getBoundingClientRect().height") >= 458
+
+
+def test_workspace_switch_roundtrip(page, tmp_path):
+    """§20 R6 复核：选择+应用后真正切到新工作区（当前路径即时更新）。"""
+    new_ws = tmp_path / "ws-live"
+    new_ws.mkdir()
+    page.goto(BASE)
+    page.wait_for_function(
+        "!!document.body._x_dataStack && document.body._x_dataStack.length > 0",
+        timeout=15000)
+    page.fill("#ws-path", str(new_ws))
+    page.click("#btn-ws-apply")
+    page.wait_for_function(
+        "document.body._x_dataStack[0].ws.workspace.endsWith('ws-live')",
+        timeout=8000)
+    assert page.text_content("#view-queue .card .hint").strip().endswith("ws-live")
