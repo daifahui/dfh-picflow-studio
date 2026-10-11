@@ -118,8 +118,9 @@ def wait_task_phase(client: TestClient, tid: str, phase: str,
     deadline = time.time() + timeout
     d = {}
     while time.time() < deadline:
-        d = client.get(f"/api/tasks/{tid}").json()
-        if d["task"]["phase"] == phase:
+        r = client.get(f"/api/tasks/{tid}")
+        d = r.json() if r.status_code == 200 else {}   # 404：任务可能尚未改名产生
+        if d.get("task", {}).get("phase") == phase:
             return d
         time.sleep(0.05)
     raise AssertionError(

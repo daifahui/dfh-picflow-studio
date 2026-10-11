@@ -222,16 +222,26 @@ def test_auto_single_task_degenerates_to_old_full_flow(client, image_dir,
 
 
 # ---------- AI 命名 ----------
-def test_ai_naming_renames_after_first_contract(client, image_dir, stub_external):
+def test_ai_naming_renames_with_numeric_prefix(client, image_dir, stub_external):
+    """AI 命名带三位数字前缀防重名（§19 R5）：001_AI 名称。"""
     tid = import_task(client, image_dir, name="pkg-2024", ai_name=True)
     client.post("/api/queue/start")
-    wait_ws(client, lambda ws: ws["queue"] and ws["queue"][0]["name"] == "AI 名称",
+    wait_ws(client, lambda ws: ws["queue"] and ws["queue"][0]["name"] == "001_AI 名称",
             timeout=15)
-    wait_task_phase(client, "AI 名称", "done")
+    wait_task_phase(client, "001_AI 名称", "done")
     from server.state import manager
-    t = manager.task("AI 名称")
-    assert t.dir.endswith("AI 名称")                     # 目录随名重命名
+    t = manager.task("001_AI 名称")
+    assert t.dir.endswith("001_AI 名称")                 # 目录随名重命名
     assert not manager.task(tid)                        # 旧 id 失效
+
+
+def test_ai_naming_prefix_increments(client, image_dir, stub_external):
+    """多个 AI 命名任务依次 001_、002_。"""
+    t1 = import_task(client, image_dir, name="a1", ai_name=True)
+    t2 = import_task(client, image_dir, name="a2", ai_name=True)
+    client.post("/api/queue/start")
+    wait_task_phase(client, "001_AI 名称", "done", timeout=20)
+    wait_task_phase(client, "002_AI 名称", "done", timeout=20)
 
 
 def test_user_rename_blocks_ai_naming(client, image_dir, stub_external):

@@ -12,7 +12,8 @@ function studio() {
     resultFilter: "all",
     progress: {},                         // task_id -> {done,total,filename,phase}
     imp: { path: "", name: "", mode: "auto", aiName: true, kind: "t2i",
-           template: "", imgDir: "", promptDir: "", params: {} },
+           template: "", imgDir: "", promptDir: "", params: {},
+           dropFiles: null, dropName: "" },
     modelOptions: { lm: [], unets: [], unet_source: "static",
                     templates: {}, multi_max: 6 },
     paramFields: [
@@ -48,6 +49,12 @@ function studio() {
         const d = await this.api("/api/defaults");
         P.imp.params = { ...d };
         P.modelOptions = await this.api("/api/models");
+        // 生图模型选中校准（§19 R1）：Alpine x-model 在 options 渲染前赋值会丢失，
+        // 先赋临时值制造变更，nextTick 后恢复目标值（默认值不在列表时回退首项）
+        const want = P.modelOptions.unets.includes(P.imp.params.comfy_model)
+          ? P.imp.params.comfy_model : P.modelOptions.unets[0];
+        P.imp.params.comfy_model = "__calibrating__";
+        P.$nextTick(() => { P.imp.params.comfy_model = want; });
         if (P.imp.kind !== "t2i" && !P.imp.template) P.onKindChange();
         const ws = await this.api("/api/workspace");
         P.applyWs(ws);
@@ -76,6 +83,12 @@ function studio() {
     addLog(text) {
       const el = document.querySelector("#logs");
       if (!el) return;
+      // 去重（§19 R3）：同一文本同一秒只显示一次，防重复订阅/重复投递刷屏
+      const key = `${text}|${new Date().toTimeString().slice(0, 8)}`;
+      this._logKeys = this._logKeys || new Set();
+      if (this._logKeys.has(key)) return;
+      this._logKeys.add(key);
+      if (this._logKeys.size > 400) this._logKeys.clear();
       const line = document.createElement("div");
       line.textContent = `[${new Date().toLocaleTimeString()}] ${text}`;
       el.appendChild(line);
@@ -191,12 +204,42 @@ function studio() {
       const t = this.ws.queue.find((x) => x.id === this.sel);
       return t ? t.kind : "t2i";
     },
+    onDrop(ev) {
+      const files = [...(ev.dataTransfer?.files || [])];
+      if (!files.length) return;
+      const archives = files.filter((f) => /\.(zip|7z)$/i.test(f.name));
+      const images = files.filter((f) => /\.(png|jpe?g|webp|bmp|gif)$/i.test(f.name));
+      if (archives.length) {
+        this.imp.dropFiles = [archives[0]];        // 压缩包取第一个
+        this.imp.dropName = archives[0].name +
+          (archives.length > 1 ? `（另有 ${archives.length - 1} 个未采用）` : "");
+      } else if (images.length) {
+        this.imp.dropFiles = images;               // 图片组 → 多图任务批量上传
+        this.imp.dropName = `${images.length} 张图片`;
+        if (this.imp.kind === "t2i") this.imp.kind = "asset";
+        this.onKindChange();
+      } else {
+        alert("拖入的文件不可用：需要 zip / 7z 压缩包或图片");
+      }
+    },
+    clearDrop() { this.imp.dropFiles = null; this.imp.dropName = ""; },
     async importTask(start) {
       try {
         let source = this.imp.path.trim();
         const fileEl = document.querySelector("#import-file").files[0];
         const multiEl = document.querySelector("#import-files");
-        if (this.imp.kind !== "t2i" && multiEl && multiEl.files.length) {
+        const dropped = this.imp.dropFiles || [];
+        if (dropped.length > 1 || (dropped.length === 1 && !/\.(zip|7z)$/i.test(dropped[0].name))) {
+          const fd = new FormData();               // 拖入的图片组 → 批量上传
+          for (const f of dropped) fd.append("files", f);
+          const up = await this.api("/api/upload/batch", { method: "POST", body: fd });
+          source = up.dir;
+        } else if (dropped.length === 1) {
+          const fd = new FormData();               // 拖入的压缩包 → 上传
+          fd.append("file", dropped[0]);
+          const up = await this.api("/api/upload", { method: "POST", body: fd });
+          source = up.path;
+        } else if (this.imp.kind !== "t2i" && multiEl && multiEl.files.length) {
           const fd = new FormData();
           for (const f of multiEl.files) fd.append("files", f);
           const up = await this.api("/api/upload/batch", { method: "POST", body: fd });
@@ -221,11 +264,20 @@ function studio() {
         this.addLog("已加入队列：" + st.created[0].name);
         this.imp.path = ""; this.imp.name = "";
         this.imp.imgDir = ""; this.imp.promptDir = "";
+        this.clearDrop();
         document.querySelector("#import-file").value = "";
         if (multiEl) multiEl.value = "";
         if (start) await this.queueStart();
         this.show("queue");
       } catch (e) { alert(e.message); }
+    },
+
+    /* ---------- 右栏：图片预览（§19 R7） ---------- */
+    livePreviewUrl() {
+      const cur = this.ws.queue.find(
+        (t) => t.phase === "captioning" || t.phase === "generating");
+      const p = cur && this.progress[cur.id];
+      return cur && p ? `/api/tasks/${cur.id}/img/thumb/${p.seq}` : "";
     },
 
     /* ---------- 队列 ---------- */

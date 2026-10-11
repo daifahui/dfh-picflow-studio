@@ -403,7 +403,17 @@ def _caption_multi(t: Task) -> None:
 
 def _maybe_ai_rename(t: Task, contract: dict) -> None:
     new_name = llm_caption.generate_task_name(contract)
-    if new_name and manager.rename_task(t, new_name, by_user=False):
+    if not new_name:
+        return
+    # 三位数字前缀防重名、便于排序区分（§19 R5）：扫工作区现有 NNN_ 前缀取 max+1
+    used = [0]
+    for d in manager.workspace.glob("[0-9][0-9][0-9]_*"):
+        try:
+            used.append(int(d.name[:3]))
+        except ValueError:
+            continue
+    new_name = f"{max(used) + 1:03d}_{new_name}"
+    if manager.rename_task(t, new_name, by_user=False):
         sse.hub.publish("log", text=f"[AI 命名] {t.source_desc} → {t.name}")
         _pub_queue()
 

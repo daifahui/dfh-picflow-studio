@@ -135,3 +135,13 @@ def test_from_dict_legacy_layout(tmp_path: Path):
     assert t.images_dir == tmp_path / "images"
     assert t.prompts_dir == tmp_path / "prompts"
     assert t.task_json_path == tmp_path / "task.json"
+
+
+def test_all_tasks_sorted_by_created(ws: Path):
+    """§19 R6：任务按创建时间早→晚返回（重命名/乱序导入不再打乱显示顺序）。"""
+    import time as _t
+    a = _mk_task(ws, "bbb")
+    _t.sleep(0.02)
+    c = _mk_task(ws, "aaa")
+    assert manager.all_tasks() == [a, c]                 # 非字母序，按创建时间
+    assert a.summary()["created"] and ":" in a.summary()["created"]
